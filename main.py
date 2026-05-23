@@ -13,6 +13,7 @@ REAL_BASE_URL = os.getenv("REAL_BASE_URL")
 REAL_API_KEY = os.getenv("REAL_API_KEY")
 REAL_MODEL_NAME = os.getenv("REAL_MODEL_NAME")
 PROXY_PORT = int(os.getenv("PROXY_PORT", 8000))
+BIND_HOST = os.getenv("BIND_HOST", "0.0.0.0")
 
 app = FastAPI(title="OpenAI Compatible Proxy")
 
@@ -95,6 +96,6 @@ async def proxy_handler(request: Request, path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"Starting proxy on port {PROXY_PORT}")
+    print(f"Starting proxy on {BIND_HOST}:{PROXY_PORT}")
     print(f"Forwarding all requests to: {REAL_BASE_URL} using model: {REAL_MODEL_NAME}")
-    uvicorn.run(app, host="0.0.0.0", port=PROXY_PORT)
+    uvicorn.run(app, host=BIND_HOST, port=PROXY_PORT)
