@@ -1,4 +1,5 @@
-fastapi
-uvicorn
+flask
 httpx
 python-dotenv
+moofile
+matplotlib

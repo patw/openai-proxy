@@ -10,11 +10,14 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# Activate virtual environment if present
-if [ -f venv/bin/activate ]; then
-    echo "🔧 Activating virtual environment..."
-    source venv/bin/activate
-fi
+# Load .env
+set -a
+source .env
+set +a
 
-echo "🚀 Starting OpenAI Compatible Proxy..."
-python3 main.py
+# Ensure data directory exists
+mkdir -p data
+
+# Run the Flask app
+echo "🚀 Starting LLM Proxy (Web UI + Proxy)..."
+python3 app.py

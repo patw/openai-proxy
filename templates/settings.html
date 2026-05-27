@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Settings — LLM Proxy{% endblock %}
+{% block content %}
+
+<h2 class="mb-4">⚙️ Global Settings</h2>
+
+{% if saved %}
+<div class="alert alert-success">Settings saved.</div>
+{% endif %}
+
+<form method="POST" class="row g-3" style="max-width:500px">
+    <div class="col-12">
+        <label for="electricity_cost_per_kwh" class="form-label">Electricity Cost ($ per kWh)</label>
+        <div class="input-group">
+            <span class="input-group-text">$</span>
+            <input type="number" step="any" min="0" class="form-control"
+                   id="electricity_cost_per_kwh" name="electricity_cost_per_kwh"
+                   value="{{ settings.electricity_cost_per_kwh }}" required>
+            <span class="input-group-text">/kWh</span>
+        </div>
+        <div class="form-text">Used to calculate cost for local models. E.g. 0.12 = 12¢ per kWh.</div>
+    </div>
+
+    <div class="col-12">
+        <label for="local_model_max_wattage" class="form-label">Local Model Power Draw (watts)</label>
+        <div class="input-group">
+            <input type="number" min="0" class="form-control"
+                   id="local_model_max_wattage" name="local_model_max_wattage"
+                   value="{{ settings.local_model_max_wattage }}" required>
+            <span class="input-group-text">W</span>
+        </div>
+        <div class="form-text">Maximum power consumption of your local GPU/rig while generating.</div>
+    </div>
+
+    <div class="col-12 mt-3">
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+    </div>
+</form>
+
+{% endblock %}

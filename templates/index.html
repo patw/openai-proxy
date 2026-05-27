@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Models — LLM Proxy{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2 class="mb-0">Configured Models</h2>
+    <a href="/models/new" class="btn btn-primary">+ Add Model</a>
+</div>
+
+{% if models %}
+<div class="table-responsive">
+<table class="table table-hover align-middle">
+<thead class="table-light">
+    <tr>
+        <th>Name</th>
+        <th>Display Name</th>
+        <th>Provider</th>
+        <th>Type</th>
+        <th>Tag</th>
+        <th>Cost / M tokens</th>
+        <th>Enabled</th>
+        <th></th>
+    </tr>
+</thead>
+<tbody>
+{% for m in models %}
+<tr>
+    <td><code>{{ m.name }}</code></td>
+    <td>{{ m.display_name }}</td>
+    <td>{{ m.provider }}</td>
+    <td>
+        {% if m.type == "local" %}
+        <span class="badge bg-success">local</span>
+        {% else %}
+        <span class="badge bg-info">remote</span>
+        {% endif %}
+    </td>
+    <td>
+        {% for tag in m.get("tags", []) %}
+        <span class="badge {% if tag == 'fast' %}bg-warning text-dark{% elif tag == 'smart' %}bg-danger{% else %}bg-success{% endif %} tag-badge">{{ tag }}</span>
+        {% endfor %}
+        {% if not m.get("tags") %}
+        <span class="text-muted">—</span>
+        {% endif %}
+    </td>
+    <td>
+        {% if m.type == "remote" %}
+        ${{ "%.2f"|format(m.input_price_per_million|default(0)) }} / ${{ "%.2f"|format(m.output_price_per_million|default(0)) }}
+        {% if m.cached_price_per_million %}
+        <br><small class="text-muted">cached: ${{ "%.2f"|format(m.cached_price_per_million) }}</small>
+        {% endif %}
+        {% else %}
+        <span class="text-muted">electricity</span>
+        {% endif %}
+    </td>
+    <td>
+        {% if m.enabled %}
+        <span class="badge bg-success">on</span>
+        {% else %}
+        <span class="badge bg-secondary">off</span>
+        {% endif %}
+    </td>
+    <td>
+        <a href="/models/{{ m.name }}/edit" class="btn btn-sm btn-outline-secondary">Edit</a>
+        <form method="POST" action="/models/{{ m.name }}/delete" style="display:inline"
+              onsubmit="return confirm('Delete model &quot;{{ m.name }}&quot;?')">
+            <button class="btn btn-sm btn-outline-danger">Del</button>
+        </form>
+    </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+
+{% if tags %}
+<div class="mt-4">
+    <h5>Special Tags</h5>
+    <ul class="list-group w-auto" style="max-width:400px">
+        {% for tag, model_name in tags.items() %}
+        <li class="list-group-item d-flex justify-content-between">
+            <span class="badge {% if tag == 'fast' %}bg-warning text-dark{% elif tag == 'smart' %}bg-danger{% else %}bg-success{% endif %}">{{ tag }}</span>
+            {% if model_name %}
+            <code>{{ model_name }}</code>
+            {% else %}
+            <span class="text-muted">not assigned</span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% else %}
+<div class="text-center py-5">
+    <p class="text-muted mb-3">No models configured yet.</p>
+    <a href="/models/new" class="btn btn-primary">Add your first model</a>
+</div>
+{% endif %}
+
+<div class="mt-5">
+    <h5>How to Use</h5>
+    <pre class="code-block"># Use the "fast" model (auto-fallback to "smart" on error)
+curl http://{{ host }}:{{ port }}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"fast","messages":[{"role":"user","content":"Hello!"}]}'
+
+# Use a specific model by name
+curl http://{{ host }}:{{ port }}/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"{{ models[0].name if models else "my-model" }}","messages":[{"role":"user","content":"Hello!"}]}'
+
+# List available models
+curl http://{{ host }}:{{ port }}/v1/models</pre>
+</div>
+
+{% endblock %}

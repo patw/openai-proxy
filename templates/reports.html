@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Reports — LLM Proxy{% endblock %}
+{% block content %}
+
+<h2 class="mb-1">📊 Usage Reports</h2>
+<p class="text-muted mb-4">Token spend and volume, updated after each request.</p>
+
+<!-- Totals cards -->
+<div class="row mb-4">
+    <div class="col-md-4">
+        <div class="card border-primary">
+            <div class="card-body text-center">
+                <h6 class="card-title text-muted">Today</h6>
+                <h3 class="card-text cost-positive">${{ "%.4f"|format(today_cost) }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card border-warning">
+            <div class="card-body text-center">
+                <h6 class="card-title text-muted">This Week</h6>
+                <h3 class="card-text cost-positive">${{ "%.4f"|format(week_cost) }}</h3>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card border-success">
+            <div class="card-body text-center">
+                <h6 class="card-title text-muted">This Month</h6>
+                <h3 class="card-text cost-positive">${{ "%.4f"|format(month_cost) }}</h3>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Charts -->
+{% if daily_chart %}
+<div class="card mb-4">
+    <div class="card-header fw-bold">Daily Cost (last {{ days }} days)</div>
+    <div class="card-body p-2">
+        <img class="chart-img" src="data:image/png;base64,{{ daily_chart }}" alt="Daily cost chart">
+    </div>
+</div>
+{% endif %}
+
+{% if token_chart %}
+<div class="card mb-4">
+    <div class="card-header fw-bold">Token Volume — Input vs Output</div>
+    <div class="card-body p-2">
+        <img class="chart-img" src="data:image/png;base64,{{ token_chart }}" alt="Token volume chart">
+    </div>
+</div>
+{% endif %}
+
+<div class="row">
+    {% if monthly_chart %}
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header fw-bold">Monthly Cost</div>
+            <div class="card-body p-2">
+                <img class="chart-img" src="data:image/png;base64,{{ monthly_chart }}" alt="Monthly chart">
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if model_chart %}
+    <div class="col-md-6">
+        <div class="card mb-4">
+            <div class="card-header fw-bold">Per-Model Breakdown ({{ days }} days)</div>
+            <div class="card-body p-2">
+                <img class="chart-img" src="data:image/png;base64,{{ model_chart }}" alt="Model breakdown">
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Daily table -->
+{% if daily %}
+<div class="card mb-4">
+    <div class="card-header fw-bold">Daily Breakdown</div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-striped table-sm mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Date</th>
+                        <th class="text-end">Input</th>
+                        <th class="text-end">Output</th>
+                        <th class="text-end">Cached</th>
+                        <th class="text-end">Requests</th>
+                        <th class="text-end">Cost</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for d in daily %}
+                    <tr>
+                        <td>{{ d.date }}</td>
+                        <td class="text-end">{{ d.input_tokens | format_number }}</td>
+                        <td class="text-end">{{ d.output_tokens | format_number }}</td>
+                        <td class="text-end">{{ d.cached_tokens | format_number }}</td>
+                        <td class="text-end">{{ d.requests }}</td>
+                        <td class="text-end cost-positive">${{ "%.6f"|format(d.cost) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Per-model table -->
+{% if per_model %}
+<div class="card mb-4">
+    <div class="card-header fw-bold">Per-Model Summary ({{ days }} days)</div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-striped table-sm mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Model</th>
+                        <th class="text-end">Input Tokens</th>
+                        <th class="text-end">Output Tokens</th>
+                        <th class="text-end">Cached</th>
+                        <th class="text-end">Requests</th>
+                        <th class="text-end">Cost</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in per_model %}
+                    <tr>
+                        <td>{{ m.model }}</td>
+                        <td class="text-end">{{ m.input_tokens | format_number }}</td>
+                        <td class="text-end">{{ m.output_tokens | format_number }}</td>
+                        <td class="text-end">{{ m.cached_tokens | format_number }}</td>
+                        <td class="text-end">{{ m.requests }}</td>
+                        <td class="text-end cost-positive">${{ "%.6f"|format(m.cost) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if not daily and not charts %}
+<div class="text-center py-5">
+    <p class="text-muted">No usage data yet. Send some requests through the proxy!</p>
+</div>
+{% endif %}
+
+{% endblock %}

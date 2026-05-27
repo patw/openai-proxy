@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}{{ "Edit" if editing else "Add" }} Model — LLM Proxy{% endblock %}
+{% block content %}
+
+<h2 class="mb-4">{{ "Edit" if editing else "Add" }} Model</h2>
+
+{% if errors %}
+<div class="alert alert-danger">
+    <ul class="mb-0">
+    {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<form method="POST" class="row g-3">
+    <!-- Name -->
+    <div class="col-md-6">
+        <label for="name" class="form-label">Name <span class="text-danger">*</span></label>
+        <input type="text" class="form-control" id="name" name="name"
+               value="{{ model.name if model else (form.name if form else '') }}"
+               placeholder="my-model-name" {% if editing %}readonly{% endif %}
+               pattern="[a-zA-Z0-9\-_]+"
+               title="Letters, numbers, hyphens, underscores">
+        <div class="form-text">Unique identifier used in the API's <code>model</code> field.</div>
+    </div>
+
+    <!-- Display Name -->
+    <div class="col-md-6">
+        <label for="display_name" class="form-label">Display Name</label>
+        <input type="text" class="form-control" id="display_name" name="display_name"
+               value="{{ model.display_name if model else (form.display_name if form else '') }}"
+               placeholder="My Model v2">
+    </div>
+
+    <!-- Provider -->
+    <div class="col-md-4">
+        <label for="provider" class="form-label">Provider</label>
+        <input type="text" class="form-control" id="provider" name="provider"
+               value="{{ model.provider if model else (form.provider if form else '') }}"
+               placeholder="fireworks, openai, local, …">
+    </div>
+
+    <!-- Type -->
+    <div class="col-md-4">
+        <label for="type" class="form-label">Type <span class="text-danger">*</span></label>
+        <select class="form-select" id="type" name="type" onchange="togglePricing()">
+            <option value="remote" {% if (model and model.type == 'remote') or (form and form.type == 'remote') %}selected{% endif %}>Remote (token pricing)</option>
+            <option value="local" {% if (model and model.type == 'local') or (form and form.type == 'local') %}selected{% endif %}>Local (electricity cost)</option>
+        </select>
+    </div>
+
+    <!-- Tags -->
+    <div class="col-md-4">
+        <label class="form-label">Tag</label>
+        <div>
+            {% set cur_tags = model.get("tags", []) if model else (form.get("tags") or []) %}
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="tag" value="" id="tag_none"
+                       {% if not cur_tags or cur_tags == [] %}checked{% endif %}>
+                <label class="form-check-label" for="tag_none">None</label>
+            </div>
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="tag" value="fast" id="tag_fast"
+                       {% if cur_tags and 'fast' in cur_tags %}checked{% endif %}>
+                <label class="form-check-label" for="tag_fast"><span class="badge bg-warning text-dark">fast</span></label>
+            </div>
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="tag" value="smart" id="tag_smart"
+                       {% if cur_tags and 'smart' in cur_tags %}checked{% endif %}>
+                <label class="form-check-label" for="tag_smart"><span class="badge bg-danger">smart</span></label>
+            </div>
+            <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="tag" value="local" id="tag_local"
+                       {% if cur_tags and 'local' in cur_tags %}checked{% endif %}>
+                <label class="form-check-label" for="tag_local"><span class="badge bg-success">local</span></label>
+            </div>
+        </div>
+        <div class="form-text">Tagged models receive special routing: <code>model="fast"</code> / <code>"smart"</code> / <code>"local"</code>.
+        Only one model per tag.</div>
+    </div>
+
+    <!-- Base URL -->
+    <div class="col-12">
+        <label for="base_url" class="form-label">Base URL <span class="text-danger">*</span></label>
+        <input type="url" class="form-control" id="base_url" name="base_url"
+               value="{{ model.base_url if model else (form.base_url if form else '') }}"
+               placeholder="https://api.fireworks.ai/inference/v1">
+    </div>
+
+    <!-- API Key -->
+    <div class="col-md-6">
+        <label for="api_key" class="form-label">API Key</label>
+        <input type="password" class="form-control" id="api_key" name="api_key"
+               value="{{ model.api_key if model else (form.api_key if form else '') }}"
+               placeholder="sk-… or leave blank for local">
+        <div class="form-text">Stored in moofile (local only — not encrypted).</div>
+    </div>
+
+    <!-- API Model Name -->
+    <div class="col-md-6">
+        <label for="api_model_name" class="form-label">API Model Name <span class="text-danger">*</span></label>
+        <input type="text" class="form-control" id="api_model_name" name="api_model_name"
+               value="{{ model.api_model_name if model else (form.api_model_name if form else '') }}"
+               placeholder="accounts/fireworks/models/deepseek-v4-pro">
+        <div class="form-text">The model name sent to the backend (the proxy rewrites to this).</div>
+    </div>
+
+    <!-- Pricing (remote only) -->
+    <div id="pricing-section">
+        <hr>
+        <h6 class="text-muted">Token Pricing (per million tokens)</h6>
+        <div class="col-md-4">
+            <label for="input_price_per_million" class="form-label">Input price <span class="text-danger">*</span></label>
+            <div class="input-group">
+                <span class="input-group-text">$</span>
+                <input type="number" step="any" min="0" class="form-control"
+                       id="input_price_per_million" name="input_price_per_million"
+                       value="{{ model.input_price_per_million if model else (form.input_price_per_million if form else '0') }}">
+                <span class="input-group-text">/M</span>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <label for="output_price_per_million" class="form-label">Output price <span class="text-danger">*</span></label>
+            <div class="input-group">
+                <span class="input-group-text">$</span>
+                <input type="number" step="any" min="0" class="form-control"
+                       id="output_price_per_million" name="output_price_per_million"
+                       value="{{ model.output_price_per_million if model else (form.output_price_per_million if form else '0') }}">
+                <span class="input-group-text">/M</span>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <label for="cached_price_per_million" class="form-label">Cached price</label>
+            <div class="input-group">
+                <span class="input-group-text">$</span>
+                <input type="number" step="any" min="0" class="form-control"
+                       id="cached_price_per_million" name="cached_price_per_million"
+                       value="{{ model.cached_price_per_million if model else (form.cached_price_per_million if form else '0') }}">
+                <span class="input-group-text">/M</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Enabled -->
+    <div class="col-12 mt-3">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="enabled" name="enabled" value="1"
+                   {% if not model or model.enabled %}checked{% endif %}>
+            <label class="form-check-label" for="enabled">Enabled</label>
+        </div>
+    </div>
+
+    <div class="col-12 mt-3">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <a href="/" class="btn btn-outline-secondary ms-2">Cancel</a>
+    </div>
+</form>
+
+<script>
+function togglePricing() {
+    var isLocal = document.getElementById('type').value === 'local';
+    var section = document.getElementById('pricing-section');
+    section.style.display = isLocal ? 'none' : '';
+    // When local is selected, uncheck remote-only tag if set
+    if (isLocal) {
+        var tagRadios = document.querySelectorAll('input[name="tag"]');
+        // Pre-select 'local' tag for convenience
+        var localRadio = document.getElementById('tag_local');
+        if (localRadio) localRadio.checked = true;
+    }
+}
+// Run on load
+togglePricing();
+</script>
+
+{% endblock %}

@@ -139,10 +139,18 @@ async def _forward_to_backend(
     """
     url = resolve_path(path, config["base_url"], config["path_segments"])
 
-    # Build headers with the backend's API key and correct host
-    headers = dict(incoming_headers)
+    # Build headers with the backend's API key and correct host.
+    # Strip the client's Authorization (if any) so we don't send duplicate
+    # auth headers, which causes Cloudflare to reject the request (HTTP 400).
+    headers = {}
+    for k, v in incoming_headers.items():
+        kl = k.lower()
+        if kl in ("host", "content-length", "authorization"):
+            continue
+        headers[k] = v
     headers["host"] = config["parsed"].netloc
-    headers["authorization"] = f"Bearer {config['api_key']}"
+    if config["api_key"]:
+        headers["authorization"] = f"Bearer {config['api_key']}"
 
     if "content-length" in headers:
         del headers["content-length"]
