@@ -185,7 +185,7 @@ def model_breakdown_chart(days: int = 30) -> str:
     ax.barh(models, costs, color=colors[:len(models)], edgecolor="white")
     ax.set_title(f"Cost per Model (last {days} days)", fontsize=14, fontweight="bold")
     ax.set_xlabel("Cost ($)")
-    ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("$%.4f"))
+    ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("$%.2f"))
     ax.grid(axis="x", alpha=0.3)
     ax.invert_yaxis()
     fig.tight_layout()
