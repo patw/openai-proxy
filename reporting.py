@@ -207,7 +207,8 @@ def token_volume_chart(days: int = 30) -> str:
     ax.bar(dates, outputs, bottom=inputs, label="Output tokens",
            color="#e67e22", edgecolor="white")
     ax.set_title("Daily Token Volume (in / out)", fontsize=14, fontweight="bold")
-    ax.set_ylabel("Tokens")
+    ax.set_ylabel("Tokens (millions)")
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x / 1_000_000:.1f}M"))
     ax.legend()
     fig.autofmt_xdate(rotation=45, ha="right")
     ax.grid(axis="y", alpha=0.3)
