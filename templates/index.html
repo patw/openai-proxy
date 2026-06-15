@@ -62,6 +62,7 @@
     </td>
     <td>
         <a href="/models/{{ m.name }}/edit" class="btn btn-sm btn-outline-secondary">Edit</a>
+        <a href="/models/{{ m.name }}/clone" class="btn btn-sm btn-outline-info">Clone</a>
         <form method="POST" action="/models/{{ m.name }}/delete" style="display:inline"
               onsubmit="return confirm('Delete model &quot;{{ m.name }}&quot;?')">
             <button class="btn btn-sm btn-outline-danger">Del</button>

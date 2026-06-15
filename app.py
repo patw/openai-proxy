@@ -100,6 +100,33 @@ def model_new():
     return render_template("model_form.html", editing=False, form={}, errors=[])
 
 
+@app.route("/models/<name>/clone", methods=["GET"])
+def model_clone(name):
+    """Pre-fill the 'add model' form with all fields from an existing model."""
+    source = get_model(name)
+    if not source:
+        flash(f"Model '{name}' not found.", "error")
+        return redirect(url_for("index"))
+
+    form_data = {
+        "name": "",
+        "display_name": source.get("display_name", ""),
+        "provider": source.get("provider", ""),
+        "type": source.get("type", "remote"),
+        "tags": source.get("tags", []),
+        "base_url": source.get("base_url", ""),
+        "api_key": source.get("api_key", ""),
+        "api_model_name": source.get("api_model_name", ""),
+        "input_price_per_million": source.get("input_price_per_million", 0),
+        "output_price_per_million": source.get("output_price_per_million", 0),
+        "cached_price_per_million": source.get("cached_price_per_million", 0),
+        "enabled": source.get("enabled", True),
+    }
+
+    return render_template("model_form.html", editing=False,
+                           form=form_data, errors=[])
+
+
 @app.route("/models/<name>/edit", methods=["GET", "POST"])
 def model_edit(name):
     model = get_model(name)
