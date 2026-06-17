@@ -32,6 +32,17 @@
         <div class="form-text">Maximum power consumption of your local GPU/rig while generating.</div>
     </div>
 
+    <div class="col-12">
+        <label for="proxy_timeout_seconds" class="form-label">Proxy Timeout (seconds)</label>
+        <div class="input-group">
+            <input type="number" min="1" class="form-control"
+                   id="proxy_timeout_seconds" name="proxy_timeout_seconds"
+                   value="{{ settings.proxy_timeout_seconds }}" required>
+            <span class="input-group-text">s</span>
+        </div>
+        <div class="form-text">How long the proxy will wait for a response from a backend model before giving up.</div>
+    </div>
+
     <div class="col-12 mt-3">
         <button type="submit" class="btn btn-primary">Save Settings</button>
     </div>

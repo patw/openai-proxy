@@ -17,7 +17,7 @@
     <div class="col-md-6">
         <label for="name" class="form-label">Name <span class="text-danger">*</span></label>
         <input type="text" class="form-control" id="name" name="name"
-               value="{{ model.name if model else (form.name if form else '') }}"
+               value="{{ model.name if model else '' }}"
                placeholder="my-model-name" {% if editing %}readonly{% endif %}
                pattern="[a-zA-Z0-9\-_]+"
                title="Letters, numbers, hyphens, underscores">
@@ -28,7 +28,7 @@
     <div class="col-md-6">
         <label for="display_name" class="form-label">Display Name</label>
         <input type="text" class="form-control" id="display_name" name="display_name"
-               value="{{ model.display_name if model else (form.display_name if form else '') }}"
+               value="{{ model.display_name if model else '' }}"
                placeholder="My Model v2">
     </div>
 
@@ -36,7 +36,7 @@
     <div class="col-md-4">
         <label for="provider" class="form-label">Provider</label>
         <input type="text" class="form-control" id="provider" name="provider"
-               value="{{ model.provider if model else (form.provider if form else '') }}"
+               value="{{ model.provider if model else '' }}"
                placeholder="fireworks, openai, local, …">
     </div>
 
@@ -44,8 +44,8 @@
     <div class="col-md-4">
         <label for="type" class="form-label">Type <span class="text-danger">*</span></label>
         <select class="form-select" id="type" name="type" onchange="togglePricing()">
-            <option value="remote" {% if (model and model.type == 'remote') or (form and form.type == 'remote') %}selected{% endif %}>Remote (token pricing)</option>
-            <option value="local" {% if (model and model.type == 'local') or (form and form.type == 'local') %}selected{% endif %}>Local (electricity cost)</option>
+            <option value="remote" {% if model and model.type == 'remote' %}selected{% endif %}>Remote (token pricing)</option>
+            <option value="local" {% if model and model.type == 'local' %}selected{% endif %}>Local (electricity cost)</option>
         </select>
     </div>
 
@@ -53,7 +53,7 @@
     <div class="col-md-4">
         <label class="form-label">Tag</label>
         <div>
-            {% set cur_tags = model.get("tags", []) if model else (form.get("tags") or []) %}
+            {% set cur_tags = model.get("tags", []) if model else [] %}
             <div class="form-check form-check-inline">
                 <input class="form-check-input" type="radio" name="tag" value="" id="tag_none"
                        {% if not cur_tags or cur_tags == [] %}checked{% endif %}>
@@ -83,7 +83,7 @@
     <div class="col-12">
         <label for="base_url" class="form-label">Base URL <span class="text-danger">*</span></label>
         <input type="url" class="form-control" id="base_url" name="base_url"
-               value="{{ model.base_url if model else (form.base_url if form else '') }}"
+               value="{{ model.base_url if model else '' }}"
                placeholder="https://api.fireworks.ai/inference/v1">
     </div>
 
@@ -91,7 +91,7 @@
     <div class="col-md-6">
         <label for="api_key" class="form-label">API Key</label>
         <input type="password" class="form-control" id="api_key" name="api_key"
-               value="{{ model.api_key if model else (form.api_key if form else '') }}"
+               value="{{ model.api_key if model else '' }}"
                placeholder="sk-… or leave blank for local">
         <div class="form-text">Stored in moofile (local only — not encrypted).</div>
     </div>
@@ -100,43 +100,45 @@
     <div class="col-md-6">
         <label for="api_model_name" class="form-label">API Model Name <span class="text-danger">*</span></label>
         <input type="text" class="form-control" id="api_model_name" name="api_model_name"
-               value="{{ model.api_model_name if model else (form.api_model_name if form else '') }}"
+               value="{{ model.api_model_name if model else '' }}"
                placeholder="accounts/fireworks/models/deepseek-v4-pro">
         <div class="form-text">The model name sent to the backend (the proxy rewrites to this).</div>
     </div>
 
     <!-- Pricing (remote only) -->
-    <div id="pricing-section">
+    <div class="col-12" id="pricing-section">
         <hr>
         <h6 class="text-muted">Token Pricing (per million tokens)</h6>
-        <div class="col-md-4">
-            <label for="input_price_per_million" class="form-label">Input price <span class="text-danger">*</span></label>
-            <div class="input-group">
-                <span class="input-group-text">$</span>
-                <input type="number" step="any" min="0" class="form-control"
-                       id="input_price_per_million" name="input_price_per_million"
-                       value="{{ model.input_price_per_million if model else (form.input_price_per_million if form else '0') }}">
-                <span class="input-group-text">/M</span>
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label for="input_price_per_million" class="form-label">Input price <span class="text-danger">*</span></label>
+                <div class="input-group">
+                    <span class="input-group-text">$</span>
+                    <input type="number" step="any" min="0" class="form-control"
+                           id="input_price_per_million" name="input_price_per_million"
+                           value="{{ model.input_price_per_million if model else '0' }}">
+                    <span class="input-group-text">/M</span>
+                </div>
             </div>
-        </div>
-        <div class="col-md-4">
-            <label for="output_price_per_million" class="form-label">Output price <span class="text-danger">*</span></label>
-            <div class="input-group">
-                <span class="input-group-text">$</span>
-                <input type="number" step="any" min="0" class="form-control"
-                       id="output_price_per_million" name="output_price_per_million"
-                       value="{{ model.output_price_per_million if model else (form.output_price_per_million if form else '0') }}">
-                <span class="input-group-text">/M</span>
+            <div class="col-md-4">
+                <label for="output_price_per_million" class="form-label">Output price <span class="text-danger">*</span></label>
+                <div class="input-group">
+                    <span class="input-group-text">$</span>
+                    <input type="number" step="any" min="0" class="form-control"
+                           id="output_price_per_million" name="output_price_per_million"
+                           value="{{ model.output_price_per_million if model else '0' }}">
+                    <span class="input-group-text">/M</span>
+                </div>
             </div>
-        </div>
-        <div class="col-md-4">
-            <label for="cached_price_per_million" class="form-label">Cached price</label>
-            <div class="input-group">
-                <span class="input-group-text">$</span>
-                <input type="number" step="any" min="0" class="form-control"
-                       id="cached_price_per_million" name="cached_price_per_million"
-                       value="{{ model.cached_price_per_million if model else (form.cached_price_per_million if form else '0') }}">
-                <span class="input-group-text">/M</span>
+            <div class="col-md-4">
+                <label for="cached_price_per_million" class="form-label">Cached price</label>
+                <div class="input-group">
+                    <span class="input-group-text">$</span>
+                    <input type="number" step="any" min="0" class="form-control"
+                           id="cached_price_per_million" name="cached_price_per_million"
+                           value="{{ model.cached_price_per_million if model else '0' }}">
+                    <span class="input-group-text">/M</span>
+                </div>
             </div>
         </div>
     </div>
@@ -145,7 +147,7 @@
     <div class="col-12 mt-3">
         <div class="form-check">
             <input class="form-check-input" type="checkbox" id="enabled" name="enabled" value="1"
-                   {% if editing and model and not model.enabled %}{% else %}checked{% endif %}>
+                   {% if model and not model.enabled %}{% else %}checked{% endif %}>
             <label class="form-check-label" for="enabled">Enabled</label>
         </div>
     </div>

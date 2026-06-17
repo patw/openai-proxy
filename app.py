@@ -16,7 +16,11 @@ import os
 import json
 from datetime import date, timedelta
 
+from dotenv import load_dotenv
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+
+# Load environment variables from .env before any config is read
+load_dotenv()
 
 from storage import get_settings, save_settings
 from models_config import (
@@ -35,7 +39,18 @@ from reporting import (
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "llm-proxy-dev-key-change-me")
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB request body limit
+
+_DEFAULT_SECRET = "llm-proxy-dev-key-change-me"
+_PLACEHOLDER_SECRET = "change-me-to-something-random"
+app.secret_key = os.getenv("FLASK_SECRET_KEY", _DEFAULT_SECRET)
+
+if not app.secret_key or app.secret_key in (_DEFAULT_SECRET, _PLACEHOLDER_SECRET):
+    raise RuntimeError(
+        "FLASK_SECRET_KEY is not set in .env or is still the default placeholder. "
+        "Please set it to a random value before starting the server."
+    )
+
 PROXY_PORT = int(os.getenv("PROXY_PORT", 8086))
 BIND_HOST = os.getenv("BIND_HOST", "0.0.0.0")
 
@@ -65,7 +80,48 @@ def index():
                            host=BIND_HOST, port=PROXY_PORT)
 
 
+@app.route("/health")
+def health():
+    """Basic health check with tag/model status."""
+    models = list_models(enabled_only=True)
+    tags = model_tags_summary()
+    return jsonify({
+        "status": "ok",
+        "models": {
+            "total": len(models),
+            "enabled": len(models),
+            "fast": tags.get("fast"),
+            "smart": tags.get("smart"),
+            "local": tags.get("local"),
+        },
+        "api": {
+            "chat_completions": "/v1/chat/completions",
+            "models": "/v1/models",
+        }
+    })
+
+
 # ---- Model CRUD ----
+
+
+def _form_to_model_preview(form):
+    """Build a model-shaped dict from form data so the UI can repopulate."""
+    tag_value = form.get("tag", "").strip()
+    return {
+        "name": form.get("name", "").strip(),
+        "display_name": form.get("display_name", "").strip(),
+        "provider": form.get("provider", "").strip(),
+        "type": form.get("type", "remote"),
+        "tags": [tag_value] if tag_value in ("fast", "smart", "local") else [],
+        "base_url": form.get("base_url", "").strip(),
+        "api_key": form.get("api_key", ""),
+        "api_model_name": form.get("api_model_name", "").strip(),
+        "input_price_per_million": form.get("input_price_per_million", "0") or "0",
+        "output_price_per_million": form.get("output_price_per_million", "0") or "0",
+        "cached_price_per_million": form.get("cached_price_per_million", "0") or "0",
+        "enabled": form.get("enabled") == "1",
+    }
+
 
 @app.route("/models/new", methods=["GET", "POST"])
 def model_new():
@@ -74,7 +130,7 @@ def model_new():
         errors = validate_model_form(form, editing=False)
         if errors:
             return render_template("model_form.html", editing=False,
-                                   form=form, errors=errors)
+                                   model=_form_to_model_preview(form), errors=errors)
 
         tag_value = form.get("tag", "").strip()
         tags = [tag_value] if tag_value in ("fast", "smart", "local") else []
@@ -97,7 +153,7 @@ def model_new():
         flash(f"Model '{data['name']}' added.", "success")
         return redirect(url_for("index"))
 
-    return render_template("model_form.html", editing=False, form={}, errors=[])
+    return render_template("model_form.html", editing=False, model=None, errors=[])
 
 
 @app.route("/models/<name>/clone", methods=["GET"])
@@ -124,7 +180,7 @@ def model_clone(name):
     }
 
     return render_template("model_form.html", editing=False,
-                           form=form_data, errors=[])
+                           model=form_data, errors=[])
 
 
 @app.route("/models/<name>/edit", methods=["GET", "POST"])
@@ -138,8 +194,12 @@ def model_edit(name):
         form = request.form
         errors = validate_model_form(form, editing=True)
         if errors:
+            # Merge submitted values into the model so the form repopulates
+            merged = dict(model)
+            merged.update(_form_to_model_preview(form))
+            merged["name"] = name  # keep read-only
             return render_template("model_form.html", editing=True,
-                                   model=model, form=form, errors=errors)
+                                   model=merged, errors=errors)
 
         tag_value = form.get("tag", "").strip()
         tags = [tag_value] if tag_value in ("fast", "smart", "local") else []
@@ -163,7 +223,7 @@ def model_edit(name):
         return redirect(url_for("index"))
 
     return render_template("model_form.html", editing=True, model=model,
-                           form={}, errors=[])
+                           errors=[])
 
 
 @app.route("/models/<name>/delete", methods=["POST"])
@@ -182,10 +242,16 @@ def model_delete(name):
 def settings_page():
     saved = False
     if request.method == "POST":
-        updates = {
-            "electricity_cost_per_kwh": float(request.form.get("electricity_cost_per_kwh", 0.12)),
-            "local_model_max_wattage": int(request.form.get("local_model_max_wattage", 300)),
-        }
+        try:
+            updates = {
+                "electricity_cost_per_kwh": float(request.form.get("electricity_cost_per_kwh", 0.12)),
+                "local_model_max_wattage": int(request.form.get("local_model_max_wattage", 300)),
+                "proxy_timeout_seconds": int(request.form.get("proxy_timeout_seconds", 120)),
+            }
+        except (ValueError, TypeError):
+            flash("Invalid settings value.", "error")
+            return redirect(url_for("settings_page"))
+
         save_settings(updates)
         saved = True
 
@@ -246,16 +312,33 @@ def chat_completions():
 
 @app.route("/v1/models", methods=["GET"])
 def list_models_api():
-    """OpenAI-compatible model list."""
+    """OpenAI-compatible model list, including tag aliases."""
     models = list_models(enabled_only=True)
+    tags = model_tags_summary()
+    seen = set()
     data = []
     for m in models:
+        name = m["name"]
+        seen.add(name)
         data.append({
-            "id": m["name"],
+            "id": name,
             "object": "model",
             "created": 0,
             "owned_by": m.get("provider", "unknown"),
         })
+
+    # Add tag aliases so clients can request "fast", "smart", or "local"
+    for tag in ("fast", "smart", "local"):
+        model_name = tags.get(tag)
+        if model_name and tag not in seen:
+            data.append({
+                "id": tag,
+                "object": "model",
+                "created": 0,
+                "owned_by": "proxy",
+            })
+            seen.add(tag)
+
     return jsonify({"object": "list", "data": data})
 
 

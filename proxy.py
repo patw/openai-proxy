@@ -13,7 +13,13 @@ from usage_tracker import extract_usage_from_json, extract_usage_from_sse_line, 
 from models_config import get_model, get_model_by_tag
 from storage import get_settings
 
-TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
+
+def get_timeout(settings: dict) -> httpx.Timeout:
+    """Build an httpx timeout from global settings."""
+    seconds = int(settings.get("proxy_timeout_seconds", 120))
+    if seconds <= 0:
+        seconds = 120
+    return httpx.Timeout(connect=10.0, read=seconds, write=30.0, pool=10.0)
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +85,12 @@ def calculate_cost(model: dict, usage: dict, duration_seconds: float, settings: 
     oprice = model.get("output_price_per_million", 0)
     cprice = model.get("cached_price_per_million", 0)
 
-    cost = (it / 1_000_000) * iprice
+    # NOTE: input_tokens from OpenAI includes cached tokens.
+    # We must exclude them here since they're priced separately
+    # at the cached rate — otherwise they'd be double-counted.
+    non_cached_input = max(it - ct, 0)
+
+    cost = (non_cached_input / 1_000_000) * iprice
     cost += (ot / 1_000_000) * oprice
     cost += (ct / 1_000_000) * cprice
     return cost
@@ -90,7 +101,7 @@ def calculate_cost(model: dict, usage: dict, duration_seconds: float, settings: 
 # ---------------------------------------------------------------------------
 
 def _forward_non_streaming(model: dict, method: str, path: str,
-                           headers: dict, body: bytes):
+                           headers: dict, body: bytes, settings: dict):
     """
     Forward a non-streaming request to the backend.
 
@@ -98,28 +109,15 @@ def _forward_non_streaming(model: dict, method: str, path: str,
     """
     url = _resolve_path(path, model["base_url"])
 
-    # Rewrite the model name in the body using string replacement to
-    # avoid altering JSON whitespace, key ordering, or encoding.
+    # Rewrite the model name in the JSON body to the backend's expected name.
     new_body = body
     requested_model = "?"
     if method == "POST" and body:
         try:
             data = json.loads(body)
             requested_model = data.get("model", "?")
-            # String-replace the model value in the original body so we
-            # don't disturb any other formatting the backend might expect.
-            old_name = json.dumps(requested_model)  # quoted JSON string
-            new_name = json.dumps(model["api_model_name"])
-            new_body = body.replace(
-                b'"model":' + old_name.encode("utf-8"),
-                b'"model":' + new_name.encode("utf-8"),
-                1,
-            )
-            # Fallback: if string replace didn't work (unusual spacing),
-            # fall back to parse-rewrite-serialize.
-            if new_body == body:
-                data["model"] = model["api_model_name"]
-                new_body = json.dumps(data).encode("utf-8")
+            data["model"] = model["api_model_name"]
+            new_body = json.dumps(data).encode("utf-8")
         except Exception:
             pass
 
@@ -144,7 +142,7 @@ def _forward_non_streaming(model: dict, method: str, path: str,
     print(f"[{model['name']}] {method} {url}  (requested: '{requested_model}' "
           f"→ using: '{model['api_model_name']}')")
 
-    with httpx.Client(timeout=TIMEOUT) as client:
+    with httpx.Client(timeout=get_timeout(settings)) as client:
         resp = client.request(method, url, headers=fwd_headers, content=new_body)
 
     # Log response for non-2xx so we can diagnose backend errors
@@ -172,7 +170,7 @@ def _forward_non_streaming(model: dict, method: str, path: str,
 # ---------------------------------------------------------------------------
 
 def _forward_streaming(model: dict, method: str, path: str,
-                       headers: dict, body: bytes):
+                       headers: dict, body: bytes, settings: dict):
     """
     Forward a streaming request, yielding raw bytes while capturing
     usage data from the final SSE chunk.
@@ -188,16 +186,8 @@ def _forward_streaming(model: dict, method: str, path: str,
         try:
             data = json.loads(body)
             requested_model = data.get("model", "?")
-            old_name = json.dumps(requested_model)
-            new_name = json.dumps(model["api_model_name"])
-            new_body = body.replace(
-                b'"model":' + old_name.encode("utf-8"),
-                b'"model":' + new_name.encode("utf-8"),
-                1,
-            )
-            if new_body == body:
-                data["model"] = model["api_model_name"]
-                new_body = json.dumps(data).encode("utf-8")
+            data["model"] = model["api_model_name"]
+            new_body = json.dumps(data).encode("utf-8")
         except Exception:
             pass
 
@@ -220,7 +210,7 @@ def _forward_streaming(model: dict, method: str, path: str,
     usage_container = [None]  # mutable container for the generator to write into
 
     def generate():
-        with httpx.Client(timeout=TIMEOUT) as client:
+        with httpx.Client(timeout=get_timeout(settings)) as client:
             with client.stream(method, url, headers=fwd_headers, content=new_body) as resp:
                 current_data = ""
                 for line in resp.iter_lines():
@@ -336,7 +326,7 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
 
     try:
         if is_streaming:
-            gen, container = _forward_streaming(model, method, path, headers, body)
+            gen, container = _forward_streaming(model, method, path, headers, body, settings)
             duration = time.time() - t0
             resp = Response(
                 stream_with_context(gen()),
@@ -345,7 +335,7 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
             )
             return resp, container[0], duration, None
         else:
-            hx_resp, usage = _forward_non_streaming(model, method, path, headers, body)
+            hx_resp, usage = _forward_non_streaming(model, method, path, headers, body, settings)
             duration = time.time() - t0
 
             status = hx_resp.status_code

@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
 from storage import get_usage_db
-from moofile import sum as moo_sum, count
 
 
 def get_daily_usage(days: int = 30) -> list:
@@ -193,7 +192,12 @@ def model_breakdown_chart(days: int = 30) -> str:
 
 
 def token_volume_chart(days: int = 30) -> str:
-    """Stacked bar chart: input vs output tokens per day."""
+    """
+    Stacked bar chart: non-cached input + cached input + output tokens per day.
+
+    Since OpenAI's prompt_tokens includes cached tokens, we split the input
+    bar into two segments so the cache contribution is visible.
+    """
     data = get_daily_usage(days)
     if not data:
         return ""
@@ -201,12 +205,19 @@ def token_volume_chart(days: int = 30) -> str:
     dates = [d["date"] for d in data]
     inputs = [d["input_tokens"] for d in data]
     outputs = [d["output_tokens"] for d in data]
+    caches = [d["cached_tokens"] for d in data]
+
+    # Non-cached input = input_tokens - cached_tokens (cached_tokens are a subset)
+    non_cached = [max(inputs[i] - caches[i], 0) for i in range(len(data))]
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(dates, inputs, label="Input tokens", color="#4a90d9", edgecolor="white")
+    ax.bar(dates, non_cached, label="Input (non-cached)", color="#4a90d9", edgecolor="white")
+    ax.bar(dates, caches, bottom=non_cached, label="Input (cached)",
+           color="#2ecc71", edgecolor="white")
     ax.bar(dates, outputs, bottom=inputs, label="Output tokens",
            color="#e67e22", edgecolor="white")
-    ax.set_title("Daily Token Volume (in / out)", fontsize=14, fontweight="bold")
+    ax.set_title("Daily Token Volume (input cached / non-cached / output)",
+                 fontsize=14, fontweight="bold")
     ax.set_ylabel("Tokens (millions)")
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f"{x / 1_000_000:.1f}M"))
     ax.legend()

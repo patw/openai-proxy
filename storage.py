@@ -77,15 +77,23 @@ def get_settings() -> dict:
     """Return the global settings dict, creating defaults if absent."""
     with get_settings_db() as db:
         s = db.find_one({"_id": "global"})
+        defaults = {
+            "_id": "global",
+            "electricity_cost_per_kwh": 0.12,
+            "local_model_max_wattage": 300,
+            "proxy_timeout_seconds": 120,
+        }
         if s is None:
-            defaults = {
-                "_id": "global",
-                "electricity_cost_per_kwh": 0.12,
-                "local_model_max_wattage": 300,
-            }
             db.insert(defaults)
             return defaults
-        return s
+
+        # Backfill any missing keys from the defaults (for older records)
+        merged = {**defaults, **s}
+        if merged != s:
+            set_kwargs = {k: v for k, v in merged.items() if k not in s and k != "_id"}
+            if set_kwargs:
+                db.update_one({"_id": "global"}, set=set_kwargs)
+        return merged
 
 
 def save_settings(updates: dict) -> dict:

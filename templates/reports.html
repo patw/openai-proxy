@@ -45,7 +45,7 @@
 
 {% if token_chart %}
 <div class="card mb-4">
-    <div class="card-header fw-bold">Token Volume — Input vs Output</div>
+    <div class="card-header fw-bold">Token Volume — Cached / Non-Cached / Output</div>
     <div class="card-body p-2">
         <img class="chart-img" src="data:image/png;base64,{{ token_chart }}" alt="Token volume chart">
     </div>
@@ -146,7 +146,7 @@
 </div>
 {% endif %}
 
-{% if not daily and not charts %}
+{% if not daily and not per_model %}
 <div class="text-center py-5">
     <p class="text-muted">No usage data yet. Send some requests through the proxy!</p>
 </div>
