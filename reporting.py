@@ -21,8 +21,15 @@ from storage import get_usage_db
 def get_daily_usage(days: int = 30) -> list:
     """
     Return daily usage summaries for the last N days.
-    Each row: {date, cost, input_tokens, output_tokens, cached_tokens, requests}
-    Aggregated across all models.
+
+    Each row: {date, cost, input_tokens (non-cached), output_tokens,
+               cached_tokens, total_input_tokens, requests}
+
+    .. note::
+        ``input_tokens`` is *non-cached* input (total prompt tokens minus
+        cached).  ``total_input_tokens`` holds the raw API value including
+        cached.  The reporting UI uses ``input_tokens`` so the billable
+        breakdown is immediately clear: fresh input + cached + output.
     """
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     with get_usage_db() as db:
@@ -45,6 +52,11 @@ def get_daily_usage(days: int = 30) -> list:
     for dt in sorted(by_date.keys()):
         row = {"date": dt, **by_date[dt]}
         row["cost"] = round(row["cost"], 6)
+        # Store total before we overwrite input_tokens
+        total = row["input_tokens"]
+        # input_tokens in the DB includes cached — expose non-cached instead
+        row["input_tokens"] = max(total - row["cached_tokens"], 0)
+        row["total_input_tokens"] = total
         result.append(row)
     return result
 
@@ -110,8 +122,14 @@ def get_per_model_summary(days: int = 30) -> list:
         by_model[mn]["cached_tokens"] += r.get("cached_tokens", 0)
         by_model[mn]["requests"] += r.get("requests", 0)
 
-    return [{"model": k, **v} for k, v in
-            sorted(by_model.items(), key=lambda x: x[1]["cost"], reverse=True)]
+    result = []
+    for mn in sorted(by_model.keys(), key=lambda m: by_model[m]["cost"], reverse=True):
+        row = {"model": mn, **by_model[mn]}
+        total = row["input_tokens"]
+        row["input_tokens"] = max(total - row["cached_tokens"], 0)
+        result.append(row)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -195,26 +213,25 @@ def token_volume_chart(days: int = 30) -> str:
     """
     Stacked bar chart: non-cached input + cached input + output tokens per day.
 
-    Since OpenAI's prompt_tokens includes cached tokens, we split the input
-    bar into two segments so the cache contribution is visible.
+    ``get_daily_usage`` now returns ``input_tokens`` as non-cached input,
+    so we stack: non-cached (blue), cached (green), output (orange).
     """
     data = get_daily_usage(days)
     if not data:
         return ""
 
     dates = [d["date"] for d in data]
-    inputs = [d["input_tokens"] for d in data]
-    outputs = [d["output_tokens"] for d in data]
+    non_cached = [d["input_tokens"] for d in data]    # already non-cached
     caches = [d["cached_tokens"] for d in data]
-
-    # Non-cached input = input_tokens - cached_tokens (cached_tokens are a subset)
-    non_cached = [max(inputs[i] - caches[i], 0) for i in range(len(data))]
+    outputs = [d["output_tokens"] for d in data]
+    # Total input = non-cached + cached (for the bottom of output bar)
+    total_input = [non_cached[i] + caches[i] for i in range(len(data))]
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(dates, non_cached, label="Input (non-cached)", color="#4a90d9", edgecolor="white")
     ax.bar(dates, caches, bottom=non_cached, label="Input (cached)",
            color="#2ecc71", edgecolor="white")
-    ax.bar(dates, outputs, bottom=inputs, label="Output tokens",
+    ax.bar(dates, outputs, bottom=total_input, label="Output tokens",
            color="#e67e22", edgecolor="white")
     ax.set_title("Daily Token Volume (input cached / non-cached / output)",
                  fontsize=14, fontweight="bold")
