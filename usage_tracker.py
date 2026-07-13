@@ -119,3 +119,30 @@ def record_usage(
                 "requests": 1,
                 "duration_seconds": duration_seconds,
             })
+
+    # Compact monthly when dead records exceed 30%
+    if date.today().day == 1:
+        _maybe_compact("usage")
+
+
+def _maybe_compact(collection_name: str):
+    """Check dead_ratio and compact if above 30%."""
+    from storage import get_usage_db, get_models_db, get_settings_db
+
+    dbs = {
+        "usage": get_usage_db,
+        "models": get_models_db,
+        "settings": get_settings_db,
+    }
+    opener = dbs.get(collection_name)
+    if not opener:
+        return
+    try:
+        with opener() as db:
+            stats = db.stats()
+            if stats.get("dead_ratio", 0) > 0.30:
+                print(f"[moofile] Compacting {collection_name}.bson "
+                      f"(dead_ratio={stats['dead_ratio']:.0%})")
+                db.compact()
+    except Exception as e:
+        print(f"[moofile] Compaction failed for {collection_name}: {e}")

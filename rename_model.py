@@ -54,12 +54,14 @@ def rename_model(old_name: str, new_name: str):
         old_displays = sorted(set(r.get("model_display", "?") for r in records))
         print(f"Found {len(records)} usage record(s) with display name(s): {old_displays}")
 
-        for r in records:
-            new_id = f"{r['date']}:{new_name}"
-            db.delete_one({"_id": r["_id"]})
-            r["_id"] = new_id
-            r["model_name"] = new_name
-            db.insert(r)
+        # Use atomic batch so a crash mid-way doesn't lose records
+        with db.batch():
+            for r in records:
+                new_id = f"{r['date']}:{new_name}"
+                db.delete_one({"_id": r["_id"]})
+                r["_id"] = new_id
+                r["model_name"] = new_name
+                db.insert(r)
 
         print(f"Updated {len(records)} usage record(s).")
 

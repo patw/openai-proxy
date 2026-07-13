@@ -51,52 +51,56 @@ def main():
     with get_models_db() as mdb:
         models = {m["name"]: m for m in mdb.find({}).to_list()}
 
-    updated = 0
-    skipped = 0
-    errors = 0
-
     with get_usage_db() as db:
         records = db.find({}).to_list()
 
     print(f"Found {len(records)} usage record(s)\n")
 
-    for r in records:
-        rid = r["_id"]
-        model_name = r.get("model_name", "?")
+    if dry_run:
+        updated = len([r for r in records if corrected_cost(r, models.get(r.get("model_name", "?")), settings) != r.get("cost", 0)])
+        skipped = len(records) - updated
+        print(f"\nDry-run complete.  {updated} records would change, {skipped} unchanged.")
+        return
 
-        old_cost = r.get("cost", 0)
-        model = models.get(model_name)
+    # Apply corrections — open collection once
+    updated = 0
+    skipped = 0
+    errors = 0
+    with get_usage_db() as udb:
+        for r in records:
+            rid = r["_id"]
+            model_name = r.get("model_name", "?")
 
-        new_cost = corrected_cost(r, model, settings)
-        delta = round(new_cost - old_cost, 10)
+            old_cost = r.get("cost", 0)
+            model = models.get(model_name)
 
-        if abs(delta) < 0.0000000001:
-            skipped += 1
-            continue
+            new_cost = corrected_cost(r, model, settings)
+            delta = round(new_cost - old_cost, 10)
 
-        direction = "↓" if delta < 0 else "↑"
-        pct = (new_cost / old_cost * 100) if old_cost else 0
-        print(f"  {direction} {rid:50s}  ${old_cost:<9.8f} → ${new_cost:<9.8f}  ({'%+.2f' % (delta * 100):s}¢, {pct:.0f}% of original)")
+            if abs(delta) < 0.0000000001:
+                skipped += 1
+                continue
 
-        if model is None and r.get("model_type") != "local":
-            print(f"    ⚠ WARNING: model '{model_name}' not found in config — cost unchanged (can't recompute)")
-            skipped += 1
-            continue
+            direction = "↓" if delta < 0 else "↑"
+            pct = (new_cost / old_cost * 100) if old_cost else 0
+            print(f"  {direction} {rid:50s}  ${old_cost:<9.8f} → ${new_cost:<9.8f}  ({'%+.2f' % (delta * 100):s}¢, {pct:.0f}% of original)")
 
-        if dry_run:
-            updated += 1
-            continue
+            if model is None and r.get("model_type") != "local":
+                print(f"    ⚠ WARNING: model '{model_name}' not found in config — cost unchanged (can't recompute)")
+                skipped += 1
+                continue
 
-        try:
-            with get_usage_db() as udb:
+            try:
                 udb.update_one({"_id": rid}, set={"cost": new_cost})
-            updated += 1
-        except Exception as e:
-            print(f"    ✗ ERROR updating {rid}: {e}")
-            errors += 1
+                updated += 1
+            except Exception as e:
+                print(f"    ✗ ERROR updating {rid}: {e}")
+                errors += 1
 
-    action = "preview" if dry_run else "update"
-    print(f"\nDone.  {updated} would-be updates ({action}), {skipped} skipped (no change), {errors} errors.")
+        # Single fsync after all updates
+        udb.sync()
+
+    print(f"\nDone.  {updated} updated, {skipped} skipped (no change), {errors} errors.")
 
 
 if __name__ == "__main__":
