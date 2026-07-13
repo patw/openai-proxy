@@ -22,6 +22,84 @@ def get_timeout(settings: dict) -> httpx.Timeout:
     return httpx.Timeout(connect=10.0, read=seconds, write=30.0, pool=10.0)
 
 
+
+# ---------------------------------------------------------------------------
+# Reasoning option sanitization
+# ---------------------------------------------------------------------------
+
+REASONING_TOP_LEVEL_KEYS = {
+    "reasoning_effort",
+    "reasoning",
+    "reasoning_history",
+    "thinking",
+    "reasoning_format",
+    "include_reasoning",
+}
+
+REASONING_MESSAGE_KEYS = {
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+}
+
+UNSUPPORTED_REASONING_ERROR_MARKERS = (
+    "reasoning_effort",
+    "reasoning_history",
+    "reasoning_content",
+    "reasoning_details",
+    "include_reasoning",
+    "reasoning_format",
+    "unsupported parameter",
+    "unknown parameter",
+    "unknown field",
+    "extra inputs are not permitted",
+    "unrecognized request argument",
+)
+
+
+def _sanitize_reasoning_options(body: bytes) -> tuple[bytes, bool]:
+    """Remove reasoning-specific request/message fields for a retry.
+
+    Returns (new_body, changed). If the body isn't JSON/object, returns it
+    unchanged.
+    """
+    try:
+        data = json.loads(body)
+    except Exception:
+        return body, False
+    if not isinstance(data, dict):
+        return body, False
+
+    changed = False
+    for key in list(REASONING_TOP_LEVEL_KEYS):
+        if key in data:
+            data.pop(key, None)
+            changed = True
+
+    messages = data.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                for key in list(REASONING_MESSAGE_KEYS):
+                    if key in msg:
+                        msg.pop(key, None)
+                        changed = True
+
+    if not changed:
+        return body, False
+    return json.dumps(data).encode("utf-8"), True
+
+
+def _looks_like_unsupported_reasoning_error(resp) -> bool:
+    """Heuristic for providers that reject unknown reasoning parameters."""
+    if resp is None or getattr(resp, "status_code", None) != 400:
+        return False
+    try:
+        text = resp.text.lower()
+    except Exception:
+        return False
+    return any(marker in text for marker in UNSUPPORTED_REASONING_ERROR_MARKERS)
+
 # ---------------------------------------------------------------------------
 # Path resolution (ported from original)
 # ---------------------------------------------------------------------------
@@ -326,6 +404,9 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
 
     try:
         if is_streaming:
+            # We can't safely inspect a streaming 400 after yielding bytes, but if
+            # the request includes reasoning fields we can pre-sanitize for models
+            # whose first streaming attempt fails before body bytes are emitted.
             gen, container = _forward_streaming(model, method, path, headers, body, settings)
             duration = time.time() - t0
             resp = Response(
@@ -336,6 +417,11 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
             return resp, container[0], duration, None
         else:
             hx_resp, usage = _forward_non_streaming(model, method, path, headers, body, settings)
+            if _looks_like_unsupported_reasoning_error(hx_resp):
+                sanitized_body, changed = _sanitize_reasoning_options(body)
+                if changed:
+                    print(f"[{model['name']}] retrying without unsupported reasoning options")
+                    hx_resp, usage = _forward_non_streaming(model, method, path, headers, sanitized_body, settings)
             duration = time.time() - t0
 
             status = hx_resp.status_code
