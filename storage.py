@@ -97,6 +97,7 @@ def _close_pool() -> None:
 #   provider                 str   just for display (fireworks, openai, local, …)
 #   base_url                 str   backend base URL
 #   api_key                  str   authentication key for the backend
+#   api_key_header           str   optional — header name for auth ("" → Authorization: Bearer, "api-key" → Azure-style)
 #   api_model_name           str   model name to send to the backend
 #   type                     str   "remote" or "local"
 #   tags                     list  subset of ["fast", "smart", "local"] (max 1)

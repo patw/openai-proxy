@@ -88,12 +88,23 @@
     </div>
 
     <!-- API Key -->
-    <div class="col-md-6">
+    <div class="col-md-4">
         <label for="api_key" class="form-label">API Key</label>
         <input type="password" class="form-control" id="api_key" name="api_key"
                value="{{ model.api_key if model else '' }}"
                placeholder="sk-… or leave blank for local">
         <div class="form-text">Stored in moofile (local only — not encrypted).</div>
+    </div>
+
+    <!-- Auth Header -->
+    <div class="col-md-2">
+        <label for="api_key_header" class="form-label">Auth Header</label>
+        <select class="form-select" id="api_key_header" name="api_key_header">
+            {% set cur_hdr = model.get("api_key_header", "") if model else "" %}
+            <option value="" {% if not cur_hdr %}selected{% endif %}>Bearer (OpenAI)</option>
+            <option value="api-key" {% if cur_hdr == "api-key" %}selected{% endif %}>api-key (Azure)</option>
+        </select>
+        <div class="form-text">How the API key is sent.</div>
     </div>
 
     <!-- API Model Name -->

@@ -198,7 +198,13 @@ def _rewrite_body_model(body: bytes, model: dict, method: str):
 
 
 def _build_forward_headers(headers: dict, model: dict, method: str) -> dict:
-    """Copy client headers, dropping hop-by-hop ones and overriding auth/host."""
+    """Copy client headers, dropping hop-by-hop ones and overriding auth/host.
+
+    Supports two authentication styles via the optional ``api_key_header`` field:
+      - Default (unset or empty): ``Authorization: Bearer <key>`` (OpenAI-style)
+      - ``"api-key"``: ``api-key: <key>`` (Azure OpenAI-style)
+      - Any other value: that header name, raw key value (custom providers)
+    """
     fwd_headers = {}
     for k, v in headers.items():
         kl = k.lower()
@@ -207,13 +213,24 @@ def _build_forward_headers(headers: dict, model: dict, method: str) -> dict:
             continue
         fwd_headers[k] = v
 
+    # Also drop the custom auth header if the client is sending one — we'll
+    # replace it with the model's own key.
+    api_key_header = model.get("api_key_header", "").strip()
+    if api_key_header:
+        for k in list(fwd_headers.keys()):
+            if k.lower() == api_key_header.lower():
+                del fwd_headers[k]
+
     # Ensure Content-Type is set for POST requests
     if method == "POST" and "content-type" not in {k.lower() for k in fwd_headers}:
         fwd_headers["Content-Type"] = "application/json"
 
     fwd_headers["host"] = urlparse(model["base_url"]).netloc
     if model.get("api_key"):
-        fwd_headers["authorization"] = f"Bearer {model['api_key']}"
+        if api_key_header:
+            fwd_headers[api_key_header] = model["api_key"]
+        else:
+            fwd_headers["authorization"] = f"Bearer {model['api_key']}"
     return fwd_headers
 
 
