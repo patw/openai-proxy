@@ -426,9 +426,7 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
 
             status = hx_resp.status_code
             # Convert httpx.Response → Flask Response
-            resp_headers = dict(hx_resp.headers)
-            resp_headers.pop("transfer-encoding", None)
-            resp_headers.pop("content-encoding", None)
+            resp_headers = _filter_response_headers(hx_resp.headers)
             flask_resp = Response(
                 hx_resp.content,
                 status=status,
@@ -449,6 +447,18 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
         return None, None, time.time() - t0, f"Unexpected error: {e}"
 
 
+_HOP_BY_HOP_RESPONSE_HEADERS = (
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "content-encoding",
+    "content-length",
+)
+
+
+def _filter_response_headers(headers) -> dict:
+    """Strip hop-by-hop headers that a WSGI app is not allowed to set (PEP 3333)."""
+    return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS}
+
+
 def _should_fallback(status_code: int) -> bool:
     return status_code >= 500 or status_code == 429
 
@@ -459,7 +469,7 @@ def _build_error_response(error: str, resp):
         return Response(
             resp.content,
             status=resp.status_code,
-            headers=dict(resp.headers),
+            headers=_filter_response_headers(resp.headers),
         )
     return jsonify({"error": error}), 502
 
