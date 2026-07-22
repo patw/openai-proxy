@@ -175,19 +175,15 @@ def calculate_cost(model: dict, usage: dict, duration_seconds: float, settings: 
 
 
 # ---------------------------------------------------------------------------
-# Forwarding — non-streaming
+# Request building (shared by streaming and non-streaming paths)
 # ---------------------------------------------------------------------------
 
-def _forward_non_streaming(model: dict, method: str, path: str,
-                           headers: dict, body: bytes, settings: dict):
-    """
-    Forward a non-streaming request to the backend.
+def _rewrite_body_model(body: bytes, model: dict, method: str):
+    """Rewrite the JSON `model` field to the backend's expected name.
 
-    Returns (response, usage_dict_or_None).
+    Returns (new_body, requested_model_name). Leaves the body untouched if
+    it isn't a POST with a JSON object.
     """
-    url = _resolve_path(path, model["base_url"])
-
-    # Rewrite the model name in the JSON body to the backend's expected name.
     new_body = body
     requested_model = "?"
     if method == "POST" and body:
@@ -198,9 +194,11 @@ def _forward_non_streaming(model: dict, method: str, path: str,
             new_body = json.dumps(data).encode("utf-8")
         except Exception:
             pass
+    return new_body, requested_model
 
-    # Build headers — keep everything the client sent except hop-by-hop
-    # headers and anything we explicitly override below.
+
+def _build_forward_headers(headers: dict, model: dict, method: str) -> dict:
+    """Copy client headers, dropping hop-by-hop ones and overriding auth/host."""
     fwd_headers = {}
     for k, v in headers.items():
         kl = k.lower()
@@ -216,6 +214,23 @@ def _forward_non_streaming(model: dict, method: str, path: str,
     fwd_headers["host"] = urlparse(model["base_url"]).netloc
     if model.get("api_key"):
         fwd_headers["authorization"] = f"Bearer {model['api_key']}"
+    return fwd_headers
+
+
+# ---------------------------------------------------------------------------
+# Forwarding — non-streaming
+# ---------------------------------------------------------------------------
+
+def _forward_non_streaming(model: dict, method: str, path: str,
+                           headers: dict, body: bytes, settings: dict):
+    """
+    Forward a non-streaming request to the backend.
+
+    Returns (response, usage_dict_or_None).
+    """
+    url = _resolve_path(path, model["base_url"])
+    new_body, requested_model = _rewrite_body_model(body, model, method)
+    fwd_headers = _build_forward_headers(headers, model, method)
 
     print(f"[{model['name']}] {method} {url}  (requested: '{requested_model}' "
           f"→ using: '{model['api_model_name']}')")
@@ -247,67 +262,85 @@ def _forward_non_streaming(model: dict, method: str, path: str,
 # Forwarding — streaming (SSE)
 # ---------------------------------------------------------------------------
 
-def _forward_streaming(model: dict, method: str, path: str,
-                       headers: dict, body: bytes, settings: dict):
+def _open_upstream_stream(model: dict, method: str, path: str,
+                          headers: dict, body: bytes, settings: dict):
     """
-    Forward a streaming request, yielding raw bytes while capturing
-    usage data from the final SSE chunk.
+    Open a streaming request to the backend and return (client, stream_ctx, resp)
+    with the response status/headers available but the body not yet consumed.
 
-    Returns (generator_or_Response, usage_container_list).
-    Caller should use stream_with_context().
+    This lets the caller inspect resp.status_code *before* committing a status
+    to the client — which is what makes streaming error-passthrough and
+    fallback possible. The caller owns closing stream_ctx and client (via
+    _close_stream) or handing them to the streaming generator.
+
+    Raises the usual httpx errors if the connection can't be established.
     """
     url = _resolve_path(path, model["base_url"])
-
-    new_body = body
-    requested_model = "?"
-    if method == "POST" and body:
-        try:
-            data = json.loads(body)
-            requested_model = data.get("model", "?")
-            data["model"] = model["api_model_name"]
-            new_body = json.dumps(data).encode("utf-8")
-        except Exception:
-            pass
-
-    fwd_headers = {}
-    for k, v in headers.items():
-        kl = k.lower()
-        if kl in ("host", "content-length", "transfer-encoding", "connection",
-                  "authorization"):
-            continue
-        fwd_headers[k] = v
-    if method == "POST" and "content-type" not in {k.lower() for k in fwd_headers}:
-        fwd_headers["Content-Type"] = "application/json"
-    fwd_headers["host"] = urlparse(model["base_url"]).netloc
-    if model.get("api_key"):
-        fwd_headers["authorization"] = f"Bearer {model['api_key']}"
+    new_body, requested_model = _rewrite_body_model(body, model, method)
+    fwd_headers = _build_forward_headers(headers, model, method)
 
     print(f"[{model['name']}] {method} {url} (stream)  (requested: '{requested_model}' "
           f"→ using: '{model['api_model_name']}')")
 
-    usage_container = [None]  # mutable container for the generator to write into
+    client = httpx.Client(timeout=get_timeout(settings))
+    stream_ctx = client.stream(method, url, headers=fwd_headers, content=new_body)
+    try:
+        resp = stream_ctx.__enter__()  # sends the request, reads status + headers
+    except BaseException:
+        client.close()
+        raise
+    return client, stream_ctx, resp
 
+
+def _close_stream(client, stream_ctx) -> None:
+    """Best-effort teardown of an upstream streaming connection."""
+    try:
+        stream_ctx.__exit__(None, None, None)
+    except Exception:
+        pass
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
+def _stream_response(client, stream_ctx, up_resp, model: dict,
+                     settings: dict, t0: float) -> Response:
+    """
+    Build a Flask streaming Response that proxies SSE bytes from an already-open
+    upstream response, then records usage once the stream completes.
+
+    This is the fix for streaming usage tracking: usage is recorded inside the
+    generator's finally block (after the client has consumed the stream), not
+    before streaming begins.
+    """
     def generate():
-        with httpx.Client(timeout=get_timeout(settings)) as client:
-            with client.stream(method, url, headers=fwd_headers, content=new_body) as resp:
-                current_data = ""
-                for line in resp.iter_lines():
-                    # Yield the line back to the client
-                    yield (line + "\n").encode("utf-8")
+        usage = None
+        try:
+            for line in up_resp.iter_lines():
+                # Yield the line back to the client
+                yield (line + "\n").encode("utf-8")
 
-                    # Try to parse SSE data lines for usage
-                    if line.startswith("data: "):
-                        sse_data = line[6:]  # strip "data: "
-                        if sse_data != "[DONE]":
-                            current_data = sse_data
+                # Try to parse SSE data lines for usage; keep the last one found
+                if line.startswith("data: "):
+                    sse_data = line[6:]  # strip "data: "
+                    if sse_data != "[DONE]":
+                        parsed = extract_usage_from_sse_line(sse_data)
+                        if parsed:
+                            usage = parsed
+        finally:
+            _close_stream(client, stream_ctx)
+            try:
+                duration = time.time() - t0
+                record_usage_for_model(model, usage, duration, settings)
+            except Exception as e:
+                print(f"[{model['name']}] failed to record streaming usage: {e}")
 
-                # After the stream ends, extract usage from the last data line
-                if current_data:
-                    usage = extract_usage_from_sse_line(current_data)
-                    if usage:
-                        usage_container[0] = usage
-
-    return generate, usage_container
+    return Response(
+        stream_with_context(generate()),
+        status=200,
+        headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +425,66 @@ def handle_proxy_request(method: str, path: str, headers: dict, body: bytes):
     return resp
 
 
+def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dict,
+                               body: bytes, settings: dict, t0: float):
+    """
+    Attempt a streaming forward.
+
+    Returns (response, usage, duration, error) like _attempt_forward. On
+    success the response streams the body and records usage itself, so the
+    returned usage is always None (record_usage_for_model no-ops on None).
+
+    Because we inspect the upstream status before emitting any bytes, an
+    error status can trigger fallback (5xx/429) or be surfaced to the client
+    (other 4xx) instead of being masked as a 200 stream.
+    """
+    attempt_body = body
+    for reasoning_retry in (False, True):
+        try:
+            client, stream_ctx, up = _open_upstream_stream(
+                model, method, path, headers, attempt_body, settings
+            )
+        except httpx.ConnectError as e:
+            return None, None, time.time() - t0, f"Connection error: {e}"
+        except httpx.ReadTimeout as e:
+            return None, None, time.time() - t0, f"Timeout: {e}"
+        except httpx.RemoteProtocolError as e:
+            return None, None, time.time() - t0, f"Protocol error: {e}"
+
+        status = up.status_code
+
+        if status < 400:
+            # Success — stream the body; usage is recorded when it completes.
+            resp = _stream_response(client, stream_ctx, up, model, settings, t0)
+            return resp, None, time.time() - t0, None
+
+        # Error response — buffer its (small) body so we can inspect/forward it.
+        try:
+            err_body = up.read()
+        except Exception:
+            err_body = b""
+        err_headers = _filter_response_headers(up.headers)
+        _close_stream(client, stream_ctx)
+
+        # Parity with the non-streaming path: one retry without reasoning
+        # options if the backend rejected them. Safe — no bytes emitted yet.
+        if (not reasoning_retry and status == 400
+                and any(m in err_body.decode("utf-8", "replace").lower()
+                        for m in UNSUPPORTED_REASONING_ERROR_MARKERS)):
+            sanitized_body, changed = _sanitize_reasoning_options(body)
+            if changed:
+                print(f"[{model['name']}] retrying without unsupported reasoning options (stream)")
+                attempt_body = sanitized_body
+                continue
+
+        duration = time.time() - t0
+        if _should_fallback(status):
+            return None, None, duration, f"HTTP {status}"
+        # Non-retryable error — surface it to the client (no fallback).
+        return (Response(err_body, status=status, headers=err_headers),
+                None, duration, None)
+
+
 def _attempt_forward(model: dict, method: str, path: str, headers: dict,
                      body: bytes, is_streaming: bool, settings: dict):
     """
@@ -404,17 +497,7 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
 
     try:
         if is_streaming:
-            # We can't safely inspect a streaming 400 after yielding bytes, but if
-            # the request includes reasoning fields we can pre-sanitize for models
-            # whose first streaming attempt fails before body bytes are emitted.
-            gen, container = _forward_streaming(model, method, path, headers, body, settings)
-            duration = time.time() - t0
-            resp = Response(
-                stream_with_context(gen()),
-                status=200,
-                headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
-            )
-            return resp, container[0], duration, None
+            return _attempt_forward_streaming(model, method, path, headers, body, settings, t0)
         else:
             hx_resp, usage = _forward_non_streaming(model, method, path, headers, body, settings)
             if _looks_like_unsupported_reasoning_error(hx_resp):

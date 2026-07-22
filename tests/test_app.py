@@ -236,3 +236,29 @@ class TestFlaskApp:
         }, follow_redirects=True)
         assert resp.status_code == 200
         assert "Settings saved" in resp.get_data(as_text=True)
+
+    def test_proxy_open_when_no_key(self, client):
+        # Default: PROXY_API_KEY unset → /v1/* is not gated.
+        resp = client.get("/v1/models")
+        assert resp.status_code == 200
+
+    def test_proxy_api_key_enforced(self, client, monkeypatch):
+        import app as app_module
+        monkeypatch.setattr(app_module, "PROXY_API_KEY", "s3cret")
+
+        # Missing key → 401
+        assert client.get("/v1/models").status_code == 401
+        # Wrong key → 401
+        assert client.get(
+            "/v1/models", headers={"Authorization": "Bearer nope"}
+        ).status_code == 401
+        # Correct key → 200
+        assert client.get(
+            "/v1/models", headers={"Authorization": "Bearer s3cret"}
+        ).status_code == 200
+
+    def test_web_ui_not_gated_by_proxy_key(self, client, monkeypatch):
+        import app as app_module
+        monkeypatch.setattr(app_module, "PROXY_API_KEY", "s3cret")
+        # The web UI / health check are never gated by the proxy key.
+        assert client.get("/health").status_code == 200

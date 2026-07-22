@@ -8,15 +8,84 @@ Three collections:
 """
 
 import os
+import atexit
+import threading
 from moofile import Collection
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 
-def _open(path: str, **kwargs) -> Collection:
-    """Open a moofile collection — creates the data dir if needed."""
+# ---------------------------------------------------------------------------
+# Connection pool
+# ---------------------------------------------------------------------------
+# moofile Collections load the whole file into an in-memory index on open, so
+# re-opening one per request means a full scan every time (and the usage file
+# grows unbounded).  Instead we keep one long-lived Collection per file and
+# reuse it.
+#
+# moofile Collections are NOT thread-safe, and the proxy serves requests on
+# multiple threads (waitress threads=8), so every access is serialized by a
+# per-collection re-entrant lock.  Holding that lock for the whole `with`
+# block also makes read-modify-write sequences (e.g. the usage upsert in
+# record_usage, or the tag-uniqueness update in save_model) atomic within the
+# process, which prevents the lost-increment race that plain per-request
+# opens are subject to.
+#
+# NOTE: because the index is now long-lived, this process will not observe
+# writes made by *other* processes (e.g. the rename_model.py / backfill_costs.py
+# maintenance scripts) until it is restarted.  Run those with the server stopped.
+
+_pool: dict[str, "_PooledCollection"] = {}
+_pool_guard = threading.Lock()
+
+
+class _PooledCollection:
+    """A shared Collection plus its lock, usable as a context manager.
+
+    Entering acquires the lock and returns the underlying Collection;
+    exiting releases the lock but keeps the Collection open for reuse.
+    """
+
+    def __init__(self, full_path: str, **kwargs):
+        self._lock = threading.RLock()
+        self._collection = Collection(full_path, **kwargs)
+
+    def __enter__(self) -> Collection:
+        self._lock.acquire()
+        return self._collection
+
+    def __exit__(self, *exc) -> bool:
+        self._lock.release()
+        return False
+
+    def close(self) -> None:
+        with self._lock:
+            self._collection.close()
+
+
+def _open(path: str, **kwargs) -> "_PooledCollection":
+    """Return the pooled collection for *path*, creating it once on first use."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    return Collection(os.path.join(DATA_DIR, path), **kwargs)
+    full_path = os.path.join(DATA_DIR, path)
+    key = os.path.abspath(full_path)
+    with _pool_guard:
+        pooled = _pool.get(key)
+        if pooled is None:
+            pooled = _PooledCollection(full_path, **kwargs)
+            _pool[key] = pooled
+        return pooled
+
+
+@atexit.register
+def _close_pool() -> None:
+    """Flush and close all pooled collections on interpreter shutdown."""
+    with _pool_guard:
+        for pooled in _pool.values():
+            try:
+                pooled.close()
+            except Exception:
+                pass
+        _pool.clear()
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ Serves:
 
 import os
 import json
+import hmac
 from datetime import date, timedelta
 
 from dotenv import load_dotenv
@@ -52,7 +53,38 @@ if not app.secret_key or app.secret_key in (_DEFAULT_SECRET, _PLACEHOLDER_SECRET
     )
 
 PROXY_PORT = int(os.getenv("PROXY_PORT", 8086))
-BIND_HOST = os.getenv("BIND_HOST", "0.0.0.0")
+# Default to loopback so a fresh install isn't exposed to the network. Set
+# BIND_HOST to your LAN IP (or 0.0.0.0) in .env to reach it from other devices.
+BIND_HOST = os.getenv("BIND_HOST", "127.0.0.1")
+
+# Optional shared-secret gate for the proxy API. When PROXY_API_KEY is unset
+# (the default) the /v1/* endpoints are open — fine for localhost-only use.
+# Set it in .env to require `Authorization: Bearer <key>` on every proxy call,
+# which is what you want once BIND_HOST is exposed to your LAN.
+PROXY_API_KEY = os.getenv("PROXY_API_KEY", "").strip()
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+# ---------------------------------------------------------------------------
+# Proxy API authentication
+# ---------------------------------------------------------------------------
+
+@app.before_request
+def _require_proxy_key():
+    """Enforce the shared key on /v1/* requests when one is configured.
+
+    No key configured → open (localhost default). The web UI and /health are
+    never gated here.
+    """
+    if not request.path.startswith("/v1/"):
+        return
+    if not PROXY_API_KEY:
+        return
+    expected = f"Bearer {PROXY_API_KEY}"
+    provided = request.headers.get("Authorization", "")
+    if not hmac.compare_digest(provided, expected):
+        return jsonify({"error": "Unauthorized"}), 401
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +399,10 @@ def proxy_catchall(path):
 
 if __name__ == "__main__":
     import waitress
+    if BIND_HOST not in _LOOPBACK_HOSTS and not PROXY_API_KEY:
+        print(f"⚠️  WARNING: bound to non-loopback {BIND_HOST} with no PROXY_API_KEY set — "
+              "the proxy API is reachable on your network with no authentication.")
+        print("   Set PROXY_API_KEY in .env to require a shared key.")
     print(f"Starting LLM Proxy on {BIND_HOST}:{PROXY_PORT}")
     print(f"Web UI:  http://{BIND_HOST}:{PROXY_PORT}/")
     print(f"Proxy:   http://{BIND_HOST}:{PROXY_PORT}/v1/chat/completions")
