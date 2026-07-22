@@ -366,7 +366,8 @@ def proxy_catchall(path):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import waitress
     print(f"Starting LLM Proxy on {BIND_HOST}:{PROXY_PORT}")
     print(f"Web UI:  http://{BIND_HOST}:{PROXY_PORT}/")
     print(f"Proxy:   http://{BIND_HOST}:{PROXY_PORT}/v1/chat/completions")
-    app.run(host=BIND_HOST, port=PROXY_PORT, debug=False, threaded=True)
+    waitress.serve(app, host=BIND_HOST, port=PROXY_PORT, threads=8)

@@ -19,7 +19,7 @@ def get_timeout(settings: dict) -> httpx.Timeout:
     seconds = int(settings.get("proxy_timeout_seconds", 120))
     if seconds <= 0:
         seconds = 120
-    return httpx.Timeout(connect=10.0, read=seconds, write=30.0, pool=10.0)
+    return httpx.Timeout(connect=10.0, read=seconds, write=seconds, pool=10.0)
 
 
 

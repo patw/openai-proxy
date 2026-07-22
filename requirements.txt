@@ -4,3 +4,4 @@ python-dotenv
 moofile
 matplotlib
 pytest
+waitress
