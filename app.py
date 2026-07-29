@@ -63,6 +63,13 @@ BIND_HOST = os.getenv("BIND_HOST", "127.0.0.1")
 # which is what you want once BIND_HOST is exposed to your LAN.
 PROXY_API_KEY = os.getenv("PROXY_API_KEY", "").strip()
 
+# Worker threads. A non-streaming completion occupies one thread for the whole
+# upstream call — often tens of seconds — so this is a hard cap on how many
+# requests can be in flight at once, *not* a CPU setting. The threads sit
+# blocked on a socket, so they cost almost nothing; the old default of 8 just
+# queued everything past the 8th caller.
+PROXY_THREADS = int(os.getenv("PROXY_THREADS", 32))
+
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
@@ -283,6 +290,7 @@ def settings_page():
                 "electricity_cost_per_kwh": float(request.form.get("electricity_cost_per_kwh", 0.12)),
                 "local_model_max_wattage": int(request.form.get("local_model_max_wattage", 300)),
                 "proxy_timeout_seconds": int(request.form.get("proxy_timeout_seconds", 120)),
+                "stream_include_usage": request.form.get("stream_include_usage") == "1",
             }
         except (ValueError, TypeError):
             flash("Invalid settings value.", "error")
@@ -410,4 +418,5 @@ if __name__ == "__main__":
     print(f"Starting LLM Proxy on {BIND_HOST}:{PROXY_PORT}")
     print(f"Web UI:  http://{BIND_HOST}:{PROXY_PORT}/")
     print(f"Proxy:   http://{BIND_HOST}:{PROXY_PORT}/v1/chat/completions")
-    waitress.serve(app, host=BIND_HOST, port=PROXY_PORT, threads=8)
+    print(f"Threads: {PROXY_THREADS} concurrent requests")
+    waitress.serve(app, host=BIND_HOST, port=PROXY_PORT, threads=PROXY_THREADS)

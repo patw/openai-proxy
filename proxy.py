@@ -3,7 +3,10 @@ Proxy forwarding logic — sends requests to the real backend, captures usage,
 and implements automatic fallback between fast ↔ smart models.
 """
 
+import atexit
 import json
+import os
+import threading
 import time
 import httpx
 from urllib.parse import urlparse
@@ -22,9 +25,58 @@ def get_timeout(settings: dict) -> httpx.Timeout:
     return httpx.Timeout(connect=10.0, read=seconds, write=seconds, pool=10.0)
 
 
+# ---------------------------------------------------------------------------
+# Shared HTTP client
+# ---------------------------------------------------------------------------
+# One long-lived client for the whole process so TCP + TLS connections to the
+# backends are pooled and reused.  Building a fresh httpx.Client per request
+# meant a full handshake on every call — typically 100-300ms of dead time
+# against a remote provider.
+#
+# httpx.Client is thread-safe, so waitress's worker threads can share it.  The
+# timeout is *not* baked into the client (it comes from settings and can change
+# at runtime), so every call passes `timeout=` explicitly.
+
+_client_lock = threading.Lock()
+_shared_client: httpx.Client | None = None
+
+
+def get_http_client() -> httpx.Client:
+    """Return the process-wide pooled HTTP client, creating it on first use."""
+    global _shared_client
+    with _client_lock:
+        if _shared_client is None:
+            # The pool must be at least as large as the server's worker thread
+            # count, or it — not the threads — becomes the concurrency ceiling,
+            # and requests start failing with PoolTimeout once the pool is
+            # saturated for longer than the pool timeout.
+            threads = int(os.getenv("PROXY_THREADS", 32))
+            max_conns = max(100, threads * 2)
+            _shared_client = httpx.Client(
+                limits=httpx.Limits(max_keepalive_connections=max(20, threads),
+                                    max_connections=max_conns,
+                                    keepalive_expiry=90.0),
+            )
+        return _shared_client
+
+
+def reset_http_client() -> None:
+    """Close and drop the shared client (used at shutdown and by tests)."""
+    global _shared_client
+    with _client_lock:
+        if _shared_client is not None:
+            try:
+                _shared_client.close()
+            except Exception:
+                pass
+        _shared_client = None
+
+
+atexit.register(reset_http_client)
+
 
 # ---------------------------------------------------------------------------
-# Reasoning option sanitization
+# Unsupported-option sanitization
 # ---------------------------------------------------------------------------
 
 REASONING_TOP_LEVEL_KEYS = {
@@ -42,13 +94,14 @@ REASONING_MESSAGE_KEYS = {
     "reasoning_details",
 }
 
-UNSUPPORTED_REASONING_ERROR_MARKERS = (
+UNSUPPORTED_OPTION_ERROR_MARKERS = (
     "reasoning_effort",
     "reasoning_history",
     "reasoning_content",
     "reasoning_details",
     "include_reasoning",
     "reasoning_format",
+    "stream_options",
     "unsupported parameter",
     "unknown parameter",
     "unknown field",
@@ -56,9 +109,16 @@ UNSUPPORTED_REASONING_ERROR_MARKERS = (
     "unrecognized request argument",
 )
 
+# Backwards-compatible alias — the marker list covers more than reasoning now.
+UNSUPPORTED_REASONING_ERROR_MARKERS = UNSUPPORTED_OPTION_ERROR_MARKERS
 
-def _sanitize_reasoning_options(body: bytes) -> tuple[bytes, bool]:
-    """Remove reasoning-specific request/message fields for a retry.
+
+def _sanitize_unsupported_options(body: bytes) -> tuple[bytes, bool]:
+    """Strip optional request fields a backend may reject, for a retry.
+
+    Covers the reasoning-specific request/message fields and ``stream_options``
+    (which we inject ourselves for usage tracking — see ``_rewrite_body_model``,
+    and which older/local backends often reject).
 
     Returns (new_body, changed). If the body isn't JSON/object, returns it
     unchanged.
@@ -76,6 +136,10 @@ def _sanitize_reasoning_options(body: bytes) -> tuple[bytes, bool]:
             data.pop(key, None)
             changed = True
 
+    if "stream_options" in data:
+        data.pop("stream_options", None)
+        changed = True
+
     messages = data.get("messages")
     if isinstance(messages, list):
         for msg in messages:
@@ -90,15 +154,27 @@ def _sanitize_reasoning_options(body: bytes) -> tuple[bytes, bool]:
     return json.dumps(data).encode("utf-8"), True
 
 
-def _looks_like_unsupported_reasoning_error(resp) -> bool:
-    """Heuristic for providers that reject unknown reasoning parameters."""
+def _would_inject_usage(body: bytes, settings: dict) -> bool:
+    """True if _rewrite_body_model would add stream_options to this body."""
+    if not settings.get("stream_include_usage", True):
+        return False
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False
+    return (isinstance(data, dict) and bool(data.get("stream"))
+            and "stream_options" not in data)
+
+
+def _looks_like_unsupported_option_error(resp) -> bool:
+    """Heuristic for providers that reject unknown optional parameters."""
     if resp is None or getattr(resp, "status_code", None) != 400:
         return False
     try:
         text = resp.text.lower()
     except Exception:
         return False
-    return any(marker in text for marker in UNSUPPORTED_REASONING_ERROR_MARKERS)
+    return any(marker in text for marker in UNSUPPORTED_OPTION_ERROR_MARKERS)
 
 # ---------------------------------------------------------------------------
 # Path resolution (ported from original)
@@ -178,8 +254,18 @@ def calculate_cost(model: dict, usage: dict, duration_seconds: float, settings: 
 # Request building (shared by streaming and non-streaming paths)
 # ---------------------------------------------------------------------------
 
-def _rewrite_body_model(body: bytes, model: dict, method: str):
+def _rewrite_body_model(body: bytes, model: dict, method: str,
+                        settings: dict | None = None,
+                        inject_usage: bool = True):
     """Rewrite the JSON `model` field to the backend's expected name.
+
+    Also opts the request into streaming usage reporting: OpenAI-compatible
+    backends only emit a `usage` block mid-stream when the request carries
+    `stream_options: {"include_usage": true}`, and most clients never send it.
+    Without this, every streaming request would be recorded as costing $0 —
+    which defeats the point of the tracker.  Controlled by the
+    `stream_include_usage` setting, and skipped on a retry (`inject_usage`)
+    after a backend has rejected the option.
 
     Returns (new_body, requested_model_name). Leaves the body untouched if
     it isn't a POST with a JSON object.
@@ -191,6 +277,12 @@ def _rewrite_body_model(body: bytes, model: dict, method: str):
             data = json.loads(body)
             requested_model = data.get("model", "?")
             data["model"] = model["api_model_name"]
+
+            want_usage = (settings or {}).get("stream_include_usage", True)
+            if (inject_usage and want_usage and data.get("stream")
+                    and "stream_options" not in data):
+                data["stream_options"] = {"include_usage": True}
+
             new_body = json.dumps(data).encode("utf-8")
         except Exception:
             pass
@@ -239,21 +331,24 @@ def _build_forward_headers(headers: dict, model: dict, method: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _forward_non_streaming(model: dict, method: str, path: str,
-                           headers: dict, body: bytes, settings: dict):
+                           headers: dict, body: bytes, settings: dict,
+                           inject_usage: bool = True):
     """
     Forward a non-streaming request to the backend.
 
     Returns (response, usage_dict_or_None).
     """
     url = _resolve_path(path, model["base_url"])
-    new_body, requested_model = _rewrite_body_model(body, model, method)
+    new_body, requested_model = _rewrite_body_model(body, model, method, settings,
+                                                    inject_usage=inject_usage)
     fwd_headers = _build_forward_headers(headers, model, method)
 
     print(f"[{model['name']}] {method} {url}  (requested: '{requested_model}' "
           f"→ using: '{model['api_model_name']}')")
 
-    with httpx.Client(timeout=get_timeout(settings)) as client:
-        resp = client.request(method, url, headers=fwd_headers, content=new_body)
+    resp = get_http_client().request(method, url, headers=fwd_headers,
+                                     content=new_body,
+                                     timeout=get_timeout(settings))
 
     # Log response for non-2xx so we can diagnose backend errors
     if resp.status_code >= 400:
@@ -280,48 +375,46 @@ def _forward_non_streaming(model: dict, method: str, path: str,
 # ---------------------------------------------------------------------------
 
 def _open_upstream_stream(model: dict, method: str, path: str,
-                          headers: dict, body: bytes, settings: dict):
+                          headers: dict, body: bytes, settings: dict,
+                          inject_usage: bool = True):
     """
-    Open a streaming request to the backend and return (client, stream_ctx, resp)
+    Open a streaming request to the backend and return (stream_ctx, resp)
     with the response status/headers available but the body not yet consumed.
 
     This lets the caller inspect resp.status_code *before* committing a status
     to the client — which is what makes streaming error-passthrough and
-    fallback possible. The caller owns closing stream_ctx and client (via
-    _close_stream) or handing them to the streaming generator.
+    fallback possible. The caller owns closing stream_ctx (via _close_stream)
+    or handing it to the streaming generator.
 
     Raises the usual httpx errors if the connection can't be established.
     """
     url = _resolve_path(path, model["base_url"])
-    new_body, requested_model = _rewrite_body_model(body, model, method)
+    new_body, requested_model = _rewrite_body_model(body, model, method, settings,
+                                                    inject_usage=inject_usage)
     fwd_headers = _build_forward_headers(headers, model, method)
 
     print(f"[{model['name']}] {method} {url} (stream)  (requested: '{requested_model}' "
           f"→ using: '{model['api_model_name']}')")
 
-    client = httpx.Client(timeout=get_timeout(settings))
-    stream_ctx = client.stream(method, url, headers=fwd_headers, content=new_body)
-    try:
-        resp = stream_ctx.__enter__()  # sends the request, reads status + headers
-    except BaseException:
-        client.close()
-        raise
-    return client, stream_ctx, resp
+    stream_ctx = get_http_client().stream(method, url, headers=fwd_headers,
+                                          content=new_body,
+                                          timeout=get_timeout(settings))
+    resp = stream_ctx.__enter__()  # sends the request, reads status + headers
+    return stream_ctx, resp
 
 
-def _close_stream(client, stream_ctx) -> None:
-    """Best-effort teardown of an upstream streaming connection."""
+def _close_stream(stream_ctx) -> None:
+    """Release an upstream streaming connection back to the shared pool.
+
+    The client itself is process-wide and must NOT be closed here.
+    """
     try:
         stream_ctx.__exit__(None, None, None)
     except Exception:
         pass
-    try:
-        client.close()
-    except Exception:
-        pass
 
 
-def _stream_response(client, stream_ctx, up_resp, model: dict,
+def _stream_response(stream_ctx, up_resp, model: dict,
                      settings: dict, t0: float) -> Response:
     """
     Build a Flask streaming Response that proxies SSE bytes from an already-open
@@ -346,7 +439,7 @@ def _stream_response(client, stream_ctx, up_resp, model: dict,
                         if parsed:
                             usage = parsed
         finally:
-            _close_stream(client, stream_ctx)
+            _close_stream(stream_ctx)
             try:
                 duration = time.time() - t0
                 record_usage_for_model(model, usage, duration, settings)
@@ -424,12 +517,14 @@ def handle_proxy_request(method: str, path: str, headers: dict, body: bytes):
     if error and fallback:
         print(f"[fallback] Primary '{primary['name']}' failed ({error}), "
               f"trying '{fallback['name']}'...")
+        primary_resp = resp
         resp, usage, duration, error2 = _attempt_forward(
             fallback, method, path, headers, body, is_streaming, settings
         )
         if error2:
-            # Both failed — return the primary error
-            return _build_error_response(error, resp)
+            # Both failed — pass through whichever upstream response we have,
+            # preferring the fallback's (it is the more recent attempt).
+            return _build_error_response(error, resp or primary_resp)
         # Fallback succeeded — record usage under the fallback model
         record_usage_for_model(fallback, usage, duration, settings)
         return resp
@@ -456,10 +551,12 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
     (other 4xx) instead of being masked as a 200 stream.
     """
     attempt_body = body
-    for reasoning_retry in (False, True):
+    inject_usage = True
+    for option_retry in (False, True):
         try:
-            client, stream_ctx, up = _open_upstream_stream(
-                model, method, path, headers, attempt_body, settings
+            stream_ctx, up = _open_upstream_stream(
+                model, method, path, headers, attempt_body, settings,
+                inject_usage=inject_usage,
             )
         except httpx.ConnectError as e:
             return None, None, time.time() - t0, f"Connection error: {e}"
@@ -472,7 +569,7 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
 
         if status < 400:
             # Success — stream the body; usage is recorded when it completes.
-            resp = _stream_response(client, stream_ctx, up, model, settings, t0)
+            resp = _stream_response(stream_ctx, up, model, settings, t0)
             return resp, None, time.time() - t0, None
 
         # Error response — buffer its (small) body so we can inspect/forward it.
@@ -481,25 +578,32 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
         except Exception:
             err_body = b""
         err_headers = _filter_response_headers(up.headers)
-        _close_stream(client, stream_ctx)
+        _close_stream(stream_ctx)
 
-        # Parity with the non-streaming path: one retry without reasoning
-        # options if the backend rejected them. Safe — no bytes emitted yet.
-        if (not reasoning_retry and status == 400
+        # Parity with the non-streaming path: one retry without the optional
+        # parameters if the backend rejected them. Safe — no bytes emitted yet.
+        if (not option_retry and status == 400
                 and any(m in err_body.decode("utf-8", "replace").lower()
-                        for m in UNSUPPORTED_REASONING_ERROR_MARKERS)):
-            sanitized_body, changed = _sanitize_reasoning_options(body)
-            if changed:
-                print(f"[{model['name']}] retrying without unsupported reasoning options (stream)")
-                attempt_body = sanitized_body
+                        for m in UNSUPPORTED_OPTION_ERROR_MARKERS)):
+            sanitized_body, changed = _sanitize_unsupported_options(body)
+            # Dropping our injected stream_options also makes the retry
+            # different, even when the client's own body is unchanged.
+            if changed or _would_inject_usage(body, settings):
+                print(f"[{model['name']}] retrying without unsupported options (stream)")
+                attempt_body = sanitized_body if changed else body
+                inject_usage = False  # don't re-add stream_options on the retry
                 continue
 
         duration = time.time() - t0
+        # Keep the upstream response as the error carrier. If no fallback is
+        # configured it is passed through verbatim, so clients still see the
+        # real status (and headers like Retry-After on a 429) instead of a
+        # synthetic 502.
+        err_resp = Response(err_body, status=status, headers=err_headers)
         if _should_fallback(status):
-            return None, None, duration, f"HTTP {status}"
+            return err_resp, None, duration, f"HTTP {status}"
         # Non-retryable error — surface it to the client (no fallback).
-        return (Response(err_body, status=status, headers=err_headers),
-                None, duration, None)
+        return err_resp, None, duration, None
 
 
 def _attempt_forward(model: dict, method: str, path: str, headers: dict,
@@ -517,11 +621,15 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
             return _attempt_forward_streaming(model, method, path, headers, body, settings, t0)
         else:
             hx_resp, usage = _forward_non_streaming(model, method, path, headers, body, settings)
-            if _looks_like_unsupported_reasoning_error(hx_resp):
-                sanitized_body, changed = _sanitize_reasoning_options(body)
-                if changed:
-                    print(f"[{model['name']}] retrying without unsupported reasoning options")
-                    hx_resp, usage = _forward_non_streaming(model, method, path, headers, sanitized_body, settings)
+            if _looks_like_unsupported_option_error(hx_resp):
+                sanitized_body, changed = _sanitize_unsupported_options(body)
+                if changed or _would_inject_usage(body, settings):
+                    print(f"[{model['name']}] retrying without unsupported options")
+                    hx_resp, usage = _forward_non_streaming(
+                        model, method, path, headers,
+                        sanitized_body if changed else body, settings,
+                        inject_usage=False,
+                    )
             duration = time.time() - t0
 
             status = hx_resp.status_code
@@ -533,8 +641,11 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
                 headers=resp_headers,
             )
 
+            # Even when the status is fallback-eligible we hand the response
+            # back as the error carrier, so a failure with no fallback
+            # configured reaches the client with its real status and headers.
             if _should_fallback(status):
-                return None, usage, duration, f"HTTP {status}"
+                return flask_resp, usage, duration, f"HTTP {status}"
             return flask_resp, usage, duration, None
 
     except httpx.ConnectError as e:
@@ -564,13 +675,17 @@ def _should_fallback(status_code: int) -> bool:
 
 
 def _build_error_response(error: str, resp):
-    """Build a Flask error response when both primary and fallback fail."""
+    """Return the client's error response when a forward attempt failed.
+
+    *resp*, when present, is the already-converted Flask Response holding the
+    upstream status, body and headers — pass it through untouched so clients
+    keep the real status code (429 vs 500) and any Retry-After header, which
+    is what their backoff logic keys off.  Only when the request never
+    produced a response at all (connection error, timeout) do we synthesize
+    a 502.
+    """
     if resp is not None:
-        return Response(
-            resp.content,
-            status=resp.status_code,
-            headers=_filter_response_headers(resp.headers),
-        )
+        return resp
     return jsonify({"error": error}), 502
 
 

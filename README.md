@@ -18,7 +18,7 @@ and tweaking settings — no config files to hand-edit after initial setup.
 - **Tag-based routing** — Tag one model as `fast`, one as `smart`, one as `local`. Request `"model": "fast"` to hit your cheap model, or use any specific model name.
 - **Automatic fallback** — If a `fast`-tagged model fails (server error / timeout / rate limit), the proxy retries on the `smart` model, and vice versa.
 - **Local model support** — Run models on your own hardware. Cost is calculated from wattage × electricity price instead of token pricing.
-- **Streaming support** — SSE streaming works out of the box.
+- **Streaming support** — SSE streaming works out of the box, and streamed responses are cost-tracked too: the proxy adds `stream_options: {"include_usage": true}` so backends report token counts (toggle on the settings page if a backend rejects it).
 - **Usage tracking & charts** — Per-model, per-day token counts and dollar costs, with matplotlib bar charts on the `/reports` page.
 - **Persistent storage** — All config and usage data lives in `data/*.bson` via [moofile](https://github.com/patw/moofile).
 
@@ -78,6 +78,7 @@ All server config lives in `.env`:
 |---|---|---|
 | `PROXY_PORT` | Port the proxy + web UI listens on | `8086` |
 | `BIND_HOST` | IP to bind to (use LAN IP to avoid WAN exposure, `0.0.0.0` for all) | `0.0.0.0` |
+| `PROXY_THREADS` | Max requests handled at once. Each in-flight request holds a thread for the whole upstream call, so this caps concurrency; the threads block on the network, not the CPU. | `32` |
 | `FLASK_SECRET_KEY` | Flask session cookie secret — change this! | — |
 
 Everything else — models, API keys, pricing — is managed through the Web UI

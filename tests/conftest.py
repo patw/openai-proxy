@@ -16,6 +16,21 @@ def temp_data_dir():
         yield
 
 
+@pytest.fixture(autouse=True)
+def fresh_http_client():
+    """Drop the proxy's pooled httpx client around every test.
+
+    The client is a process-wide singleton built lazily from httpx.Client, so
+    without this a test that monkeypatches httpx.Client would either miss the
+    already-built client or leak its fake into later tests.
+    """
+    import proxy
+
+    proxy.reset_http_client()
+    yield
+    proxy.reset_http_client()
+
+
 @pytest.fixture
 def client():
     """Flask test client."""

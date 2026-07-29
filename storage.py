@@ -152,6 +152,7 @@ def get_settings() -> dict:
             "electricity_cost_per_kwh": 0.12,
             "local_model_max_wattage": 300,
             "proxy_timeout_seconds": 120,
+            "stream_include_usage": True,
         }
         if s is None:
             db.insert(defaults)

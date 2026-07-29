@@ -12,6 +12,8 @@ APT_PACKAGES=(
     python3-httpx
     python3-dotenv
     python3-matplotlib
+    python3-waitress
+    python3-pytest
 )
 
 echo "📦 Installing system packages via apt..."

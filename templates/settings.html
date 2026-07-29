@@ -43,6 +43,22 @@
         <div class="form-text">How long the proxy will wait for a response from a backend model before giving up.</div>
     </div>
 
+    <div class="col-12">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="1"
+                   id="stream_include_usage" name="stream_include_usage"
+                   {% if settings.stream_include_usage %}checked{% endif %}>
+            <label class="form-check-label" for="stream_include_usage">
+                Track usage on streaming requests
+            </label>
+        </div>
+        <div class="form-text">
+            Adds <code>stream_options: {"include_usage": true}</code> to streaming requests so
+            backends report token counts. Without it, streamed responses are recorded as $0.
+            Turn off if a backend or client rejects the extra final chunk.
+        </div>
+    </div>
+
     <div class="col-12 mt-3">
         <button type="submit" class="btn btn-primary">Save Settings</button>
     </div>
