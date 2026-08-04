@@ -120,9 +120,10 @@ def get_models_db() -> Collection:
 #   date             str   ISO date "YYYY-MM-DD"
 #   model_name       str   matches models.name
 #   model_display    str   display name at time of request
-#   input_tokens     int
-#   output_tokens    int
-#   cached_tokens    int
+#   input_tokens     int   total prompt tokens sent to the backend
+#                           (cached_tokens is a *subset* of this)
+#   output_tokens    int   completion tokens
+#   cached_tokens    int   subset of input_tokens that hit the prompt cache
 #   cost             float
 #   requests         int
 #   duration_seconds float (for local models)

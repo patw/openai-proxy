@@ -21,9 +21,9 @@ def extract_usage_from_json(data: dict) -> dict | None:
     Given a parsed JSON response body from a chat completion, return:
 
         {
-            "input_tokens": int,
+            "input_tokens": int,    # total prompt tokens (cached_tokens is a subset)
             "output_tokens": int,
-            "cached_tokens": int,   # 0 if unknown
+            "cached_tokens": int,   # subset of input_tokens; 0 if unknown
         }
 
     or None if no usage information was found.
