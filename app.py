@@ -8,6 +8,7 @@ Serves:
   /models/<name>/delete Delete a model
   /settings             Global settings (electricity, wattage)
   /reports              Usage charts and tables
+  /api/reports          Usage reports as JSON (for agents/scripts)
   /v1/chat/completions  OpenAI-compatible proxy endpoint
   /v1/models            List available models (OpenAI-compatible)
 """
@@ -30,7 +31,7 @@ from models_config import (
 )
 from proxy import handle_proxy_request
 from reporting import (
-    get_daily_usage, get_per_model_summary,
+    get_daily_usage, get_per_model_summary, get_reports_payload,
     daily_cost_chart, monthly_cost_chart, model_breakdown_chart,
     token_volume_chart,
 )
@@ -340,6 +341,19 @@ def reports():
         model_chart=model_chart,
         token_chart=token_chart,
     )
+
+
+@app.route("/api/reports")
+def api_reports():
+    """JSON report endpoint — same data as /reports, minus the charts.
+
+    Query params:
+      days  int, 1..365 (default 30) — window for daily + per-model series.
+            Weekly and monthly series use fixed lookbacks (91 / 365 days).
+    """
+    days = request.args.get("days", 30, type=int)
+    days = max(1, min(days, 365))
+    return jsonify(get_reports_payload(days))
 
 
 # ---------------------------------------------------------------------------

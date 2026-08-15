@@ -161,6 +161,12 @@ Visit **http://localhost:8086/reports** for:
 - **Token volume** — stacked bar chart of input vs output tokens per day
 - **Summary tables** — today / this week / this month totals, per-model breakdown
 
+The same data is available as JSON at **`/api/reports`** (optional `?days=N`,
+1–365, default 30) — handy for agents/scripts. It returns `totals` (today /
+week / month), `daily`, `weekly`, `monthly`, and `per_model` series, each row
+enriched with `total_tokens`, `cached_ratio`, and `cost_per_request`
+(per-model rows also include `pct_of_total_cost`).
+
 Costs for remote models are calculated from per-million-token pricing. Costs
 for local models use `wattage × duration × electricity price`.
 

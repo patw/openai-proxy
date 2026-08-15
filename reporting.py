@@ -80,7 +80,16 @@ def get_weekly_summary(days: int = 91) -> list:
         by_week[week_key]["cached_tokens"] += r.get("cached_tokens", 0)
         by_week[week_key]["requests"] += r.get("requests", 0)
 
-    return [{"week": k, **v} for k, v in sorted(by_week.items())]
+    result = []
+    for k, v in sorted(by_week.items()):
+        # Same convention as get_daily_usage: expose non-cached input as
+        # input_tokens and keep the raw total (incl. cached) separate.
+        total = v["input_tokens"]
+        v["input_tokens"] = max(total - v["cached_tokens"], 0)
+        v["total_input_tokens"] = total
+        v["cost"] = round(v["cost"], 6)
+        result.append({"week": k, **v})
+    return result
 
 
 def get_monthly_summary(days: int = 365) -> list:
@@ -101,7 +110,16 @@ def get_monthly_summary(days: int = 365) -> list:
         by_month[month_key]["cached_tokens"] += r.get("cached_tokens", 0)
         by_month[month_key]["requests"] += r.get("requests", 0)
 
-    return [{"month": k, **v} for k, v in sorted(by_month.items())]
+    result = []
+    for k, v in sorted(by_month.items()):
+        # Same convention as get_daily_usage: expose non-cached input as
+        # input_tokens and keep the raw total (incl. cached) separate.
+        total = v["input_tokens"]
+        v["input_tokens"] = max(total - v["cached_tokens"], 0)
+        v["total_input_tokens"] = total
+        v["cost"] = round(v["cost"], 6)
+        result.append({"month": k, **v})
+    return result
 
 
 def get_per_model_summary(days: int = 30) -> list:
@@ -127,9 +145,77 @@ def get_per_model_summary(days: int = 30) -> list:
         row = {"model": mn, **by_model[mn]}
         total = row["input_tokens"]
         row["input_tokens"] = max(total - row["cached_tokens"], 0)
+        row["total_input_tokens"] = total
+        row["cost"] = round(row["cost"], 6)
         result.append(row)
 
     return result
+
+
+def _enrich_row(row: dict) -> dict:
+    """Add derived fields to an aggregated usage row (mutates and returns it).
+
+    - total_tokens     : total input (incl. cached) + output tokens
+    - cached_ratio     : fraction of input tokens served from cache (0..1)
+    - cost_per_request : average cost per request in the window
+    """
+    total_input = row.get(
+        "total_input_tokens", row["input_tokens"] + row["cached_tokens"]
+    )
+    row["total_tokens"] = total_input + row["output_tokens"]
+    row["cached_ratio"] = (
+        round(row["cached_tokens"] / total_input, 6) if total_input else 0.0
+    )
+    row["cost_per_request"] = (
+        round(row["cost"] / row["requests"], 6) if row["requests"] else 0.0
+    )
+    return row
+
+
+def get_reports_payload(days: int = 30) -> dict:
+    """
+    Everything the /reports page shows, as plain data (no charts) for the
+    JSON API. ``days`` controls the daily + per-model window; weekly and
+    monthly use fixed lookbacks (91 and 365 days) so the growth series stay
+    stable as ``days`` changes.
+    """
+    daily = get_daily_usage(days)
+    weekly = get_weekly_summary(91)
+    monthly = get_monthly_summary(365)
+    per_model = get_per_model_summary(days)
+
+    today = date.today().isoformat()
+    week_start = (date.today() - timedelta(days=date.today().weekday())).isoformat()
+    month_start = date.today().replace(day=1).isoformat()
+
+    def _sum_costs(rows, since):
+        return round(sum(r["cost"] for r in rows if r.get("date", "") >= since), 6)
+
+    total_cost = sum(r["cost"] for r in per_model)
+
+    for r in daily:
+        _enrich_row(r)
+    for r in weekly:
+        _enrich_row(r)
+    for r in monthly:
+        _enrich_row(r)
+    for r in per_model:
+        _enrich_row(r)
+        r["pct_of_total_cost"] = round(r["cost"] / total_cost, 6) if total_cost else 0.0
+
+    return {
+        "generated": date.today().isoformat(),
+        "days": days,
+        "totals": {
+            "today": _sum_costs(daily, today),
+            "week": _sum_costs(daily, week_start),
+            "month": _sum_costs(daily, month_start),
+        },
+        "daily": daily,
+        "weekly": weekly,
+        "monthly": monthly,
+        "per_model": per_model,
+    }
 
 
 # ---------------------------------------------------------------------------

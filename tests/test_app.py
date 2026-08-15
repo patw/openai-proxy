@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from usage_tracker import extract_usage_from_json, extract_usage_from_sse_line
 from proxy import _resolve_path, calculate_cost
 from models_config import validate_model_form, save_model
@@ -199,6 +201,45 @@ class TestFlaskApp:
         data = resp.get_json()
         assert data["status"] == "ok"
         assert "models" in data
+    def test_api_reports_shape(self, client):
+        resp = client.get("/api/reports")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["days"] == 30
+        for key in ("totals", "daily", "weekly", "monthly", "per_model"):
+            assert key in data
+        assert set(data["totals"]) == {"today", "week", "month"}
+
+    def test_api_reports_derived_fields(self, client):
+        from usage_tracker import record_usage
+
+        record_usage("m1", "Model One", "remote",
+                     input_tokens=8000, output_tokens=2000,
+                     cached_tokens=5000, cost=0.5)
+        record_usage("m2", "Model Two", "remote",
+                     input_tokens=1000, output_tokens=500,
+                     cached_tokens=0, cost=0.1)
+
+        data = client.get("/api/reports").get_json()
+
+        # Daily row aggregates both models into one date.
+        day = data["daily"][0]
+        assert day["input_tokens"] == 4000          # non-cached input
+        assert day["total_input_tokens"] == 9000    # raw input incl. cached
+        assert day["total_tokens"] == 11500         # 9000 + 2500
+        assert day["cached_ratio"] == pytest.approx(5000 / 9000, abs=1e-6)
+        assert day["cost_per_request"] == pytest.approx(0.6 / 2, abs=1e-6)
+
+        models = {m["model"]: m for m in data["per_model"]}
+        m1 = models["Model One"]
+        assert m1["input_tokens"] == 3000           # 8000 - 5000
+        assert m1["total_input_tokens"] == 8000
+        assert m1["cached_ratio"] == pytest.approx(5000 / 8000, abs=1e-6)
+        assert m1["cost_per_request"] == pytest.approx(0.5, abs=1e-6)
+        assert m1["pct_of_total_cost"] == pytest.approx(0.5 / 0.6, abs=1e-6)
+
+        # Totals: both records land on today.
+        assert data["totals"]["today"] == pytest.approx(0.6, abs=1e-6)
 
     def test_models_list_includes_aliases(self, client):
         save_model({
