@@ -41,19 +41,19 @@
         <div class="row text-center">
             <div class="col-md-3 col-6 mb-2">
                 <div class="text-muted small">Total Input Tokens</div>
-                <div class="fw-bold">{{ lifetime.total_input_tokens | format_number }}</div>
+                <div class="fw-bold">{{ lifetime.total_input_tokens | format_number }} <span class="text-muted small">({{ lifetime.total_input_pct }}%)</span></div>
             </div>
             <div class="col-md-3 col-6 mb-2">
                 <div class="text-muted small">Input (non-cached)</div>
-                <div class="fw-bold">{{ lifetime.non_cached_input_tokens | format_number }}</div>
+                <div class="fw-bold">{{ lifetime.non_cached_input_tokens | format_number }} <span class="text-muted small">({{ lifetime.non_cached_pct }}%)</span></div>
             </div>
             <div class="col-md-2 col-6 mb-2">
                 <div class="text-muted small">Cached Input</div>
-                <div class="fw-bold text-success">{{ lifetime.cached_tokens | format_number }}</div>
+                <div class="fw-bold text-success">{{ lifetime.cached_tokens | format_number }} <span class="text-muted small">({{ lifetime.cached_pct }}%)</span></div>
             </div>
             <div class="col-md-2 col-6 mb-2">
                 <div class="text-muted small">Output Tokens</div>
-                <div class="fw-bold">{{ lifetime.output_tokens | format_number }}</div>
+                <div class="fw-bold">{{ lifetime.output_tokens | format_number }} <span class="text-muted small">({{ lifetime.output_pct }}%)</span></div>
             </div>
             <div class="col-md-2 col-6 mb-2">
                 <div class="text-muted small">Total Cost</div>
@@ -139,9 +139,9 @@
                 <tfoot class="table-light fw-bold">
                     <tr>
                         <td>Accumulated</td>
-                        <td class="text-end">{{ daily_totals.input_tokens | format_number }}</td>
-                        <td class="text-end">{{ daily_totals.output_tokens | format_number }}</td>
-                        <td class="text-end">{{ daily_totals.cached_tokens | format_number }}</td>
+                        <td class="text-end">{{ daily_totals.input_tokens | format_number }} <span class="text-muted small">({{ daily_totals.input_pct }}%)</span></td>
+                        <td class="text-end">{{ daily_totals.output_tokens | format_number }} <span class="text-muted small">({{ daily_totals.output_pct }}%)</span></td>
+                        <td class="text-end">{{ daily_totals.cached_tokens | format_number }} <span class="text-muted small">({{ daily_totals.cached_pct }}%)</span></td>
                         <td class="text-end">{{ daily_totals.requests }}</td>
                         <td class="text-end cost-positive">${{ "%.6f"|format(daily_totals.cost) }}</td>
                     </tr>
@@ -184,9 +184,9 @@
                 <tfoot class="table-light fw-bold">
                     <tr>
                         <td>Accumulated</td>
-                        <td class="text-end">{{ per_model_totals.input_tokens | format_number }}</td>
-                        <td class="text-end">{{ per_model_totals.output_tokens | format_number }}</td>
-                        <td class="text-end">{{ per_model_totals.cached_tokens | format_number }}</td>
+                        <td class="text-end">{{ per_model_totals.input_tokens | format_number }} <span class="text-muted small">({{ per_model_totals.input_pct }}%)</span></td>
+                        <td class="text-end">{{ per_model_totals.output_tokens | format_number }} <span class="text-muted small">({{ per_model_totals.output_pct }}%)</span></td>
+                        <td class="text-end">{{ per_model_totals.cached_tokens | format_number }} <span class="text-muted small">({{ per_model_totals.cached_pct }}%)</span></td>
                         <td class="text-end">{{ per_model_totals.requests }}</td>
                         <td class="text-end cost-positive">${{ "%.6f"|format(per_model_totals.cost) }}</td>
                     </tr>

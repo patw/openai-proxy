@@ -318,14 +318,24 @@ class TestReportingTotals:
         assert _row_totals(rows) == {
             "input_tokens": 300, "output_tokens": 150, "cached_tokens": 90,
             "requests": 6, "cost": 0.003,
+            "total_tokens": 540,
+            "input_pct": 56, "cached_pct": 17, "output_pct": 28,
         }
 
     def test_row_totals_handles_missing_keys(self):
         from reporting import _row_totals
-        assert _row_totals([{"input_tokens": 5, "cost": 0.0001}]) == {
-            "input_tokens": 5, "output_tokens": 0, "cached_tokens": 0,
-            "requests": 0, "cost": 0.0001,
-        }
+        t = _row_totals([{"input_tokens": 5, "cost": 0.0001}])
+        assert t["input_tokens"] == 5
+        assert t["output_tokens"] == 0 and t["cached_tokens"] == 0
+        assert t["requests"] == 0 and t["cost"] == 0.0001
+        assert t["total_tokens"] == 5
+        assert t["input_pct"] == 100 and t["output_pct"] == 0
+
+    def test_row_totals_empty_no_division_by_zero(self):
+        from reporting import _row_totals
+        t = _row_totals([])
+        assert t["total_tokens"] == 0
+        assert t["input_pct"] == 0 and t["cached_pct"] == 0
 
     def test_lifetime_summary_aggregates_all_records(self):
         from reporting import get_lifetime_summary
@@ -348,6 +358,11 @@ class TestReportingTotals:
         assert s["output_tokens"] == 500
         assert s["requests"] == 3
         assert s["cost"] == 0.03
+        assert s["total_tokens"] == 3500
+        assert s["total_input_pct"] == 86
+        assert s["non_cached_pct"] == 60
+        assert s["cached_pct"] == 26
+        assert s["output_pct"] == 14
 
     def test_reports_payload_includes_totals(self, client):
         import storage
@@ -364,3 +379,4 @@ class TestReportingTotals:
         assert payload["lifetime"]["total_input_tokens"] == 100
         assert payload["lifetime"]["cached_tokens"] == 50
         assert payload["daily_totals"]["input_tokens"] == 50  # non-cached
+        assert payload["daily_totals"]["cached_pct"] == 38

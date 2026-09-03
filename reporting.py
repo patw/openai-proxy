@@ -157,14 +157,27 @@ def _row_totals(rows: list) -> dict:
 
     Used for table footer "accumulated total" rows. Note the aggregated rows
     already expose ``input_tokens`` as *non-cached* input, so the footer Input
-    column is the sum of non-cached input across the window.
+    column is the sum of non-cached input across the window. Each token bucket
+    also carries its share of the window's total tokens (``_pct`` fields).
     """
+    input_tok = sum(r.get("input_tokens", 0) for r in rows)
+    cached = sum(r.get("cached_tokens", 0) for r in rows)
+    output = sum(r.get("output_tokens", 0) for r in rows)
+    total = input_tok + cached + output
+
+    def _pct(x):
+        return round(x / total * 100) if total else 0
+
     return {
-        "input_tokens": sum(r.get("input_tokens", 0) for r in rows),
-        "output_tokens": sum(r.get("output_tokens", 0) for r in rows),
-        "cached_tokens": sum(r.get("cached_tokens", 0) for r in rows),
+        "input_tokens": input_tok,
+        "output_tokens": output,
+        "cached_tokens": cached,
         "requests": sum(r.get("requests", 0) for r in rows),
         "cost": round(sum(r.get("cost", 0) for r in rows), 6),
+        "total_tokens": total,
+        "input_pct": _pct(input_tok),
+        "cached_pct": _pct(cached),
+        "output_pct": _pct(output),
     }
 
 
@@ -190,13 +203,24 @@ def get_lifetime_summary() -> dict:
         requests += r.get("requests", 0)
         cost += r.get("cost", 0)
 
+    non_cached = max(total_input - cached, 0)
+    total = total_input + output
+
+    def _pct(x):
+        return round(x / total * 100) if total else 0
+
     return {
         "total_input_tokens": total_input,
-        "non_cached_input_tokens": max(total_input - cached, 0),
+        "non_cached_input_tokens": non_cached,
         "cached_tokens": cached,
         "output_tokens": output,
         "requests": requests,
         "cost": round(cost, 6),
+        "total_tokens": total,
+        "total_input_pct": _pct(total_input),
+        "non_cached_pct": _pct(non_cached),
+        "cached_pct": _pct(cached),
+        "output_pct": _pct(output),
     }
 
 
