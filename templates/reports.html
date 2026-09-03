@@ -33,6 +33,37 @@
     </div>
 </div>
 
+<!-- Charts --><!-- Lifetime summary -->
+{% if lifetime %}
+<div class="card mb-4 border-dark">
+    <div class="card-header fw-bold">⏳ Lifetime Summary (all time)</div>
+    <div class="card-body">
+        <div class="row text-center">
+            <div class="col-md-3 col-6 mb-2">
+                <div class="text-muted small">Total Input Tokens</div>
+                <div class="fw-bold">{{ lifetime.total_input_tokens | format_number }}</div>
+            </div>
+            <div class="col-md-3 col-6 mb-2">
+                <div class="text-muted small">Input (non-cached)</div>
+                <div class="fw-bold">{{ lifetime.non_cached_input_tokens | format_number }}</div>
+            </div>
+            <div class="col-md-2 col-6 mb-2">
+                <div class="text-muted small">Cached Input</div>
+                <div class="fw-bold text-success">{{ lifetime.cached_tokens | format_number }}</div>
+            </div>
+            <div class="col-md-2 col-6 mb-2">
+                <div class="text-muted small">Output Tokens</div>
+                <div class="fw-bold">{{ lifetime.output_tokens | format_number }}</div>
+            </div>
+            <div class="col-md-2 col-6 mb-2">
+                <div class="text-muted small">Total Cost</div>
+                <div class="fw-bold cost-positive">${{ "%.2f"|format(lifetime.cost) }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <!-- Charts -->
 {% if daily_chart %}
 <div class="card mb-4">
@@ -105,6 +136,16 @@
                     </tr>
                     {% endfor %}
                 </tbody>
+                <tfoot class="table-light fw-bold">
+                    <tr>
+                        <td>Accumulated</td>
+                        <td class="text-end">{{ daily_totals.input_tokens | format_number }}</td>
+                        <td class="text-end">{{ daily_totals.output_tokens | format_number }}</td>
+                        <td class="text-end">{{ daily_totals.cached_tokens | format_number }}</td>
+                        <td class="text-end">{{ daily_totals.requests }}</td>
+                        <td class="text-end cost-positive">${{ "%.6f"|format(daily_totals.cost) }}</td>
+                    </tr>
+                </tfoot>
             </table>
         </div>
     </div>
@@ -140,6 +181,16 @@
                     </tr>
                     {% endfor %}
                 </tbody>
+                <tfoot class="table-light fw-bold">
+                    <tr>
+                        <td>Accumulated</td>
+                        <td class="text-end">{{ per_model_totals.input_tokens | format_number }}</td>
+                        <td class="text-end">{{ per_model_totals.output_tokens | format_number }}</td>
+                        <td class="text-end">{{ per_model_totals.cached_tokens | format_number }}</td>
+                        <td class="text-end">{{ per_model_totals.requests }}</td>
+                        <td class="text-end cost-positive">${{ "%.6f"|format(per_model_totals.cost) }}</td>
+                    </tr>
+                </tfoot>
             </table>
         </div>
     </div>

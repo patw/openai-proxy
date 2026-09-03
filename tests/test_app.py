@@ -303,3 +303,64 @@ class TestFlaskApp:
         monkeypatch.setattr(app_module, "PROXY_API_KEY", "s3cret")
         # The web UI / health check are never gated by the proxy key.
         assert client.get("/health").status_code == 200
+
+class TestReportingTotals:
+    """Accumulated totals (table footers) and lifetime summary."""
+
+    def test_row_totals_sums_columns(self):
+        from reporting import _row_totals
+        rows = [
+            {"input_tokens": 100, "output_tokens": 50, "cached_tokens": 30,
+             "requests": 2, "cost": 0.001},
+            {"input_tokens": 200, "output_tokens": 100, "cached_tokens": 60,
+             "requests": 4, "cost": 0.002},
+        ]
+        assert _row_totals(rows) == {
+            "input_tokens": 300, "output_tokens": 150, "cached_tokens": 90,
+            "requests": 6, "cost": 0.003,
+        }
+
+    def test_row_totals_handles_missing_keys(self):
+        from reporting import _row_totals
+        assert _row_totals([{"input_tokens": 5, "cost": 0.0001}]) == {
+            "input_tokens": 5, "output_tokens": 0, "cached_tokens": 0,
+            "requests": 0, "cost": 0.0001,
+        }
+
+    def test_lifetime_summary_aggregates_all_records(self):
+        from reporting import get_lifetime_summary
+        import storage
+        with storage.get_usage_db() as db:
+            db.insert({
+                "date": "2026-01-01", "model_name": "m1",
+                "input_tokens": 1000, "cached_tokens": 400,
+                "output_tokens": 200, "cost": 0.01, "requests": 1,
+            })
+            db.insert({
+                "date": "2026-06-01", "model_name": "m1",
+                "input_tokens": 2000, "cached_tokens": 500,
+                "output_tokens": 300, "cost": 0.02, "requests": 2,
+            })
+        s = get_lifetime_summary()
+        assert s["total_input_tokens"] == 3000
+        assert s["cached_tokens"] == 900
+        assert s["non_cached_input_tokens"] == 2100
+        assert s["output_tokens"] == 500
+        assert s["requests"] == 3
+        assert s["cost"] == 0.03
+
+    def test_reports_payload_includes_totals(self, client):
+        import storage
+        with storage.get_usage_db() as db:
+            db.insert({
+                "date": "2026-01-01", "model_name": "m1", "model_display": "M1",
+                "input_tokens": 100, "cached_tokens": 50,
+                "output_tokens": 30, "cost": 0.001, "requests": 1,
+            })
+        payload = client.get("/api/reports?days=365").get_json()
+        assert "daily_totals" in payload
+        assert "per_model_totals" in payload
+        assert "lifetime" in payload
+        assert payload["lifetime"]["total_input_tokens"] == 100
+        assert payload["lifetime"]["cached_tokens"] == 50
+        assert payload["daily_totals"]["input_tokens"] == 50  # non-cached

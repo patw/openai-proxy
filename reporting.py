@@ -152,6 +152,54 @@ def get_per_model_summary(days: int = 30) -> list:
     return result
 
 
+def _row_totals(rows: list) -> dict:
+    """Sum input/output/cached/requests/cost across aggregated rows.
+
+    Used for table footer "accumulated total" rows. Note the aggregated rows
+    already expose ``input_tokens`` as *non-cached* input, so the footer Input
+    column is the sum of non-cached input across the window.
+    """
+    return {
+        "input_tokens": sum(r.get("input_tokens", 0) for r in rows),
+        "output_tokens": sum(r.get("output_tokens", 0) for r in rows),
+        "cached_tokens": sum(r.get("cached_tokens", 0) for r in rows),
+        "requests": sum(r.get("requests", 0) for r in rows),
+        "cost": round(sum(r.get("cost", 0) for r in rows), 6),
+    }
+
+
+def get_lifetime_summary() -> dict:
+    """Running totals over *every* usage record the proxy has ever logged.
+
+    No date filter — a true lifetime figure across the whole collection.
+    Input tokens are returned both raw (including cached) and as the
+    non-cached (fresh, fully-priced) subset for clarity.
+    """
+    with get_usage_db() as db:
+        records = db.find({}).to_list()
+
+    total_input = 0
+    cached = 0
+    output = 0
+    requests = 0
+    cost = 0.0
+    for r in records:
+        total_input += r.get("input_tokens", 0)
+        cached += r.get("cached_tokens", 0)
+        output += r.get("output_tokens", 0)
+        requests += r.get("requests", 0)
+        cost += r.get("cost", 0)
+
+    return {
+        "total_input_tokens": total_input,
+        "non_cached_input_tokens": max(total_input - cached, 0),
+        "cached_tokens": cached,
+        "output_tokens": output,
+        "requests": requests,
+        "cost": round(cost, 6),
+    }
+
+
 def _enrich_row(row: dict) -> dict:
     """Add derived fields to an aggregated usage row (mutates and returns it).
 
@@ -215,6 +263,9 @@ def get_reports_payload(days: int = 30) -> dict:
         "weekly": weekly,
         "monthly": monthly,
         "per_model": per_model,
+        "daily_totals": _row_totals(daily),
+        "per_model_totals": _row_totals(per_model),
+        "lifetime": get_lifetime_summary(),
     }
 
 

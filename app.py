@@ -32,6 +32,7 @@ from models_config import (
 from proxy import handle_proxy_request
 from reporting import (
     get_daily_usage, get_per_model_summary, get_reports_payload,
+    get_lifetime_summary, _row_totals,
     daily_cost_chart, monthly_cost_chart, model_breakdown_chart,
     token_volume_chart,
 )
@@ -322,6 +323,11 @@ def reports():
     month_start = date.today().replace(day=1).isoformat()
     month_cost = sum(d["cost"] for d in daily if d["date"] >= month_start)
 
+    # Accumulated totals for the table footers + lifetime block
+    daily_totals = _row_totals(daily)
+    per_model_totals = _row_totals(per_model)
+    lifetime = get_lifetime_summary()
+
     # Charts
     daily_chart = daily_cost_chart(days)
     monthly_chart = monthly_cost_chart()
@@ -333,6 +339,9 @@ def reports():
         days=days,
         daily=daily,
         per_model=per_model,
+        daily_totals=daily_totals,
+        per_model_totals=per_model_totals,
+        lifetime=lifetime,
         today_cost=today_cost,
         week_cost=week_cost,
         month_cost=month_cost,
