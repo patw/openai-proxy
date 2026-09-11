@@ -11,7 +11,7 @@
         <div class="card border-primary">
             <div class="card-body text-center">
                 <h6 class="card-title text-muted">Today</h6>
-                <h3 class="card-text cost-positive">${{ "%.4f"|format(today_cost) }}</h3>
+                <h3 class="card-text cost-positive">${{ "%.2f"|format(today_cost) }}</h3>
             </div>
         </div>
     </div>
@@ -19,7 +19,7 @@
         <div class="card border-warning">
             <div class="card-body text-center">
                 <h6 class="card-title text-muted">This Week</h6>
-                <h3 class="card-text cost-positive">${{ "%.4f"|format(week_cost) }}</h3>
+                <h3 class="card-text cost-positive">${{ "%.2f"|format(week_cost) }}</h3>
             </div>
         </div>
     </div>
@@ -27,7 +27,7 @@
         <div class="card border-success">
             <div class="card-body text-center">
                 <h6 class="card-title text-muted">This Month</h6>
-                <h3 class="card-text cost-positive">${{ "%.4f"|format(month_cost) }}</h3>
+                <h3 class="card-text cost-positive">${{ "%.2f"|format(month_cost) }}</h3>
             </div>
         </div>
     </div>
@@ -132,7 +132,7 @@
                         <td class="text-end">{{ d.output_tokens | format_number }}</td>
                         <td class="text-end">{{ d.cached_tokens | format_number }}</td>
                         <td class="text-end">{{ d.requests }}</td>
-                        <td class="text-end cost-positive">${{ "%.6f"|format(d.cost) }}</td>
+                        <td class="text-end cost-positive">${{ "%.2f"|format(d.cost) }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -143,7 +143,7 @@
                         <td class="text-end">{{ daily_totals.output_tokens | format_number }} <span class="text-muted small">({{ daily_totals.output_pct }}%)</span></td>
                         <td class="text-end">{{ daily_totals.cached_tokens | format_number }} <span class="text-muted small">({{ daily_totals.cached_pct }}%)</span></td>
                         <td class="text-end">{{ daily_totals.requests }}</td>
-                        <td class="text-end cost-positive">${{ "%.6f"|format(daily_totals.cost) }}</td>
+                        <td class="text-end cost-positive">${{ "%.2f"|format(daily_totals.cost) }}</td>
                     </tr>
                 </tfoot>
             </table>
@@ -177,7 +177,7 @@
                         <td class="text-end">{{ m.output_tokens | format_number }}</td>
                         <td class="text-end">{{ m.cached_tokens | format_number }}</td>
                         <td class="text-end">{{ m.requests }}</td>
-                        <td class="text-end cost-positive">${{ "%.6f"|format(m.cost) }}</td>
+                        <td class="text-end cost-positive">${{ "%.2f"|format(m.cost) }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -188,7 +188,7 @@
                         <td class="text-end">{{ per_model_totals.output_tokens | format_number }} <span class="text-muted small">({{ per_model_totals.output_pct }}%)</span></td>
                         <td class="text-end">{{ per_model_totals.cached_tokens | format_number }} <span class="text-muted small">({{ per_model_totals.cached_pct }}%)</span></td>
                         <td class="text-end">{{ per_model_totals.requests }}</td>
-                        <td class="text-end cost-positive">${{ "%.6f"|format(per_model_totals.cost) }}</td>
+                        <td class="text-end cost-positive">${{ "%.2f"|format(per_model_totals.cost) }}</td>
                     </tr>
                 </tfoot>
             </table>
