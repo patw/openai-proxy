@@ -107,6 +107,18 @@
         <div class="form-text">How the API key is sent.</div>
     </div>
 
+    <!-- Upstream wire protocol (independent of provider label) -->
+    <div class="col-md-4">
+        <label for="api_format" class="form-label">Upstream API format</label>
+        {% set cur_format = model.get('api_format', 'chat_completions') if model else 'chat_completions' %}
+        <select class="form-select" id="api_format" name="api_format">
+            <option value="chat_completions" {% if cur_format == 'chat_completions' %}selected{% endif %}>OpenAI Chat Completions</option>
+            <option value="openai_responses" {% if cur_format == 'openai_responses' %}selected{% endif %}>OpenAI Responses</option>
+            <option value="anthropic_messages" {% if cur_format == 'anthropic_messages' %}selected{% endif %}>Anthropic Messages</option>
+        </select>
+        <div class="form-text">Clients still call <code>/v1/chat/completions</code>. Base URL should be the API root (typically ending in <code>/v1</code>).</div>
+    </div>
+
     <!-- API Model Name -->
     <div class="col-md-6">
         <label for="api_model_name" class="form-label">API Model Name <span class="text-danger">*</span></label>

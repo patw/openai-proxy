@@ -8,6 +8,7 @@ from typing import Optional
 from storage import get_models_db
 
 ALL_TAGS = {"fast", "smart", "local"}
+API_FORMATS = {"chat_completions", "openai_responses", "anthropic_messages"}
 
 
 def list_models(enabled_only: bool = False) -> list:
@@ -106,6 +107,9 @@ def validate_model_form(form: dict, editing: bool = False) -> list:
         errors.append("Base URL is required.")
     if not (form.get("api_model_name") or "").strip():
         errors.append("API model name is required.")
+
+    if form.get("api_format", "chat_completions") not in API_FORMATS:
+        errors.append("Invalid upstream API format.")
 
     mtype = form.get("type", "remote")
     if mtype not in ("remote", "local"):

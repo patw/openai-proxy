@@ -14,6 +14,7 @@ and tweaking settings — no config files to hand-edit after initial setup.
 
 - **Web UI** — Add, edit, and delete model backends through your browser. Manage fast/smart/local tags, view the dashboard at a glance.
 - **OpenAI-compatible API** — Drop-in replacement at `/v1/chat/completions` and `/v1/models`.
+- **Multiple upstream formats** — Select OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages per model. Clients continue to use `/v1/chat/completions`; native requests, results, and SSE streams are adapted back to chat-completions format.
 - **Arbitrary backends** — Configure as many remote and local models as you want, each with its own URL, API key, model name, and pricing.
 - **Tag-based routing** — Tag one model as `fast`, one as `smart`, one as `local`. Request `"model": "fast"` to hit your cheap model, or use any specific model name.
 - **Automatic fallback** — If a `fast`-tagged model fails (server error / timeout / rate limit), the proxy retries on the `smart` model, and vice versa.
@@ -95,7 +96,8 @@ When adding a model through the UI:
 | **Provider** | Label for display (e.g. `fireworks`, `openai`, `local`) |
 | **Type** | `remote` (token pricing) or `local` (electricity pricing) |
 | **Tag** | Optional: `fast`, `smart`, or `local` — at most one model per tag |
-| **Base URL** | Backend base URL |
+| **Base URL** | Backend API root, typically ending in `/v1` (e.g. `https://api.openai.com/v1` or `https://api.anthropic.com/v1`) |
+| **Upstream API format** | OpenAI Chat Completions (default for existing models), OpenAI Responses, or Anthropic Messages |
 | **API Key** | Auth key for the backend (leave empty for local models) |
 | **API Model Name** | Model name to send to the backend |
 | **Pricing** | Per-million-token prices for input, output, and cached tokens |
@@ -145,9 +147,28 @@ curl http://localhost:8086/v1/chat/completions \
 curl http://localhost:8086/v1/models
 ```
 
-> **Note:** The proxy does **not** validate incoming `Authorization` headers —
-> it replaces them with the backend's configured API key. Unrecognized model
-> names return a 400 error.
+> **Note:** Set `PROXY_API_KEY` if you want clients authenticated; otherwise the
+> proxy replaces incoming authorization with the backend's configured key.
+> Unrecognized model names return a 400 error.
+
+### Native upstream format support
+
+The downstream contract is **`/v1/chat/completions`**, including text and function
+calls, non-streaming and streaming. Selecting Responses or Anthropic Messages
+on a model translates the request to `/v1/responses` or `/v1/messages`, then
+normalizes the result and usage back to OpenAI chat format. `fast`/`smart`
+fallback can cross formats. Anthropic requests use `x-api-key` and
+`anthropic-version: 2023-06-01`; Anthropic `max_tokens` defaults to 4096.
+Existing models without an API format remain Chat Completions.
+
+Native adapters currently handle text messages, function tools/results, tool
+choice, temperature/top-p, token limits, and SSE text/tool deltas. Responses
+also supports `response_format` JSON modes. Unsupported chat options and
+non-text content (such as images and audio) are rejected instead of silently
+dropped. Native streams relay final token usage when the backend reports it;
+errors after a stream begins cannot be turned into an HTTP error or retried.
+Other `/v1/` routes remain best-effort passthrough, not format-translated.
+Legacy `/v1/completions` is **not** translated to chat completions.
 
 ---
 

@@ -15,6 +15,8 @@ from flask import Response, stream_with_context, jsonify
 from usage_tracker import extract_usage_from_json, extract_usage_from_sse_line, record_usage
 from models_config import get_model, get_model_by_tag
 from storage import get_settings
+from api_adapters import (api_format, prepare_request, normalize_response, upstream_path,
+                          StreamAdapter, TranslationError)
 
 
 def get_timeout(settings: dict) -> httpx.Timeout:
@@ -318,6 +320,13 @@ def _build_forward_headers(headers: dict, model: dict, method: str) -> dict:
         fwd_headers["Content-Type"] = "application/json"
 
     fwd_headers["host"] = urlparse(model["base_url"]).netloc
+    if api_format(model) == "anthropic_messages" and method == "POST":
+        # Do not forward client-specific keys/version headers or Bearer tokens.
+        for k in list(fwd_headers):
+            if k.lower() in ("x-api-key", "anthropic-version", "anthropic-beta"):
+                del fwd_headers[k]
+        fwd_headers["anthropic-version"] = "2023-06-01"
+        api_key_header = "x-api-key"
     if model.get("api_key"):
         if api_key_header:
             fwd_headers[api_key_header] = model["api_key"]
@@ -338,10 +347,19 @@ def _forward_non_streaming(model: dict, method: str, path: str,
 
     Returns (response, usage_dict_or_None).
     """
-    url = _resolve_path(path, model["base_url"])
-    new_body, requested_model = _rewrite_body_model(body, model, method, settings,
-                                                    inject_usage=inject_usage)
+    if path == "/v1/chat/completions" and api_format(model) != "chat_completions":
+        target_path, new_body = prepare_request(model, path, body)
+        requested_model = json.loads(body).get("model", "?")
+    else:
+        target_path = path
+        new_body, requested_model = _rewrite_body_model(body, model, method, settings,
+                                                        inject_usage=inject_usage)
+    url = _resolve_path(target_path, model["base_url"])
     fwd_headers = _build_forward_headers(headers, model, method)
+    if target_path != path:
+        for key in list(fwd_headers):
+            if key.lower() in ("stream-options", "openai-organization", "openai-project"):
+                del fwd_headers[key]
 
     print(f"[{model['name']}] {method} {url}  (requested: '{requested_model}' "
           f"→ using: '{model['api_model_name']}')")
@@ -363,6 +381,8 @@ def _forward_non_streaming(model: dict, method: str, path: str,
     if resp.status_code < 400:
         try:
             resp_data = resp.json()
+            if path == "/v1/chat/completions" and api_format(model) != "chat_completions":
+                resp_data = normalize_response(model, resp_data)
             usage = extract_usage_from_json(resp_data)
         except Exception:
             pass
@@ -388,10 +408,19 @@ def _open_upstream_stream(model: dict, method: str, path: str,
 
     Raises the usual httpx errors if the connection can't be established.
     """
-    url = _resolve_path(path, model["base_url"])
-    new_body, requested_model = _rewrite_body_model(body, model, method, settings,
-                                                    inject_usage=inject_usage)
+    if path == "/v1/chat/completions" and api_format(model) != "chat_completions":
+        target_path, new_body = prepare_request(model, path, body)
+        requested_model = json.loads(body).get("model", "?")
+    else:
+        target_path = path
+        new_body, requested_model = _rewrite_body_model(body, model, method, settings,
+                                                        inject_usage=inject_usage)
+    url = _resolve_path(target_path, model["base_url"])
     fwd_headers = _build_forward_headers(headers, model, method)
+    if target_path != path:
+        for key in list(fwd_headers):
+            if key.lower() in ("stream-options", "openai-organization", "openai-project"):
+                del fwd_headers[key]
 
     print(f"[{model['name']}] {method} {url} (stream)  (requested: '{requested_model}' "
           f"→ using: '{model['api_model_name']}')")
@@ -415,7 +444,7 @@ def _close_stream(stream_ctx) -> None:
 
 
 def _stream_response(stream_ctx, up_resp, model: dict,
-                     settings: dict, t0: float) -> Response:
+                     settings: dict, t0: float, path: str = "/v1/chat/completions") -> Response:
     """
     Build a Flask streaming Response that proxies SSE bytes from an already-open
     upstream response, then records usage once the stream completes.
@@ -424,20 +453,53 @@ def _stream_response(stream_ctx, up_resp, model: dict,
     generator's finally block (after the client has consumed the stream), not
     before streaming begins.
     """
+    native = path == "/v1/chat/completions" and api_format(model) != "chat_completions"
+
     def generate():
         usage = None
+        adapter = StreamAdapter(model) if native else None
+        event = None
+        pending_data = []
         try:
             for line in up_resp.iter_lines():
-                # Yield the line back to the client
-                yield (line + "\n").encode("utf-8")
-
-                # Try to parse SSE data lines for usage; keep the last one found
-                if line.startswith("data: "):
-                    sse_data = line[6:]  # strip "data: "
-                    if sse_data != "[DONE]":
-                        parsed = extract_usage_from_sse_line(sse_data)
+                if not native:
+                    yield (line + "\n").encode("utf-8")
+                    if line.startswith("data: "):
+                        parsed = extract_usage_from_sse_line(line[6:])
                         if parsed:
                             usage = parsed
+                    continue
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                elif line.startswith("data:"):
+                    pending_data.append(line[5:].lstrip())
+                elif line == "" and pending_data:
+                    payload = "\n".join(pending_data)
+                    pending_data = []
+                    if payload != "[DONE]":
+                        data = json.loads(payload)
+                        for chunk in adapter.feed(event or data.get("type"), data):
+                            yield f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
+                            if chunk.get("usage"):
+                                usage = extract_usage_from_json(chunk)
+                    event = None
+            if native:
+                if pending_data:
+                    payload = "\n".join(pending_data)
+                    if payload != "[DONE]":
+                        data = json.loads(payload)
+                        for chunk in adapter.feed(event or data.get("type"), data):
+                            yield f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
+                            if chunk.get("usage"):
+                                usage = extract_usage_from_json(chunk)
+                if not adapter.received_terminal:
+                    print(f"[{model['name']}] upstream stream ended without a completion event")
+                    yield b"data: {\"error\": \"Upstream stream ended without a completion event\"}\n\n"
+                else:
+                    yield b"data: [DONE]\n\n"
+        except (TranslationError, ValueError, KeyError, TypeError) as exc:
+            print(f"[{model['name']}] stream translation failed: {exc}")
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n".encode("utf-8")
         finally:
             _close_stream(stream_ctx)
             try:
@@ -487,6 +549,11 @@ def handle_proxy_request(method: str, path: str, headers: dict, body: bytes):
         pass
 
     settings = get_settings()
+    if path == "/v1/chat/completions" and api_format(model) != "chat_completions":
+        try:
+            prepare_request(model, path, body)
+        except TranslationError as exc:
+            return jsonify({"error": str(exc)}), 400
 
     # ---- Determine fallback ----
     primary = model
@@ -518,6 +585,11 @@ def handle_proxy_request(method: str, path: str, headers: dict, body: bytes):
         print(f"[fallback] Primary '{primary['name']}' failed ({error}), "
               f"trying '{fallback['name']}'...")
         primary_resp = resp
+        try:
+            if path == "/v1/chat/completions" and api_format(fallback) != "chat_completions":
+                prepare_request(fallback, path, body)
+        except TranslationError as exc:
+            return _build_error_response(f"Fallback request unsupported: {exc}", primary_resp)
         resp, usage, duration, error2 = _attempt_forward(
             fallback, method, path, headers, body, is_streaming, settings
         )
@@ -558,6 +630,8 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
                 model, method, path, headers, attempt_body, settings,
                 inject_usage=inject_usage,
             )
+        except TranslationError as e:
+            return None, None, time.time() - t0, f"Invalid upstream request: {e}"
         except httpx.ConnectError as e:
             return None, None, time.time() - t0, f"Connection error: {e}"
         except httpx.ReadTimeout as e:
@@ -569,7 +643,7 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
 
         if status < 400:
             # Success — stream the body; usage is recorded when it completes.
-            resp = _stream_response(stream_ctx, up, model, settings, t0)
+            resp = _stream_response(stream_ctx, up, model, settings, t0, path)
             return resp, None, time.time() - t0, None
 
         # Error response — buffer its (small) body so we can inspect/forward it.
@@ -582,7 +656,7 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
 
         # Parity with the non-streaming path: one retry without the optional
         # parameters if the backend rejected them. Safe — no bytes emitted yet.
-        if (not option_retry and status == 400
+        if (api_format(model) == "chat_completions" and not option_retry and status == 400
                 and any(m in err_body.decode("utf-8", "replace").lower()
                         for m in UNSUPPORTED_OPTION_ERROR_MARKERS)):
             sanitized_body, changed = _sanitize_unsupported_options(body)
@@ -621,7 +695,7 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
             return _attempt_forward_streaming(model, method, path, headers, body, settings, t0)
         else:
             hx_resp, usage = _forward_non_streaming(model, method, path, headers, body, settings)
-            if _looks_like_unsupported_option_error(hx_resp):
+            if api_format(model) == "chat_completions" and _looks_like_unsupported_option_error(hx_resp):
                 sanitized_body, changed = _sanitize_unsupported_options(body)
                 if changed or _would_inject_usage(body, settings):
                     print(f"[{model['name']}] retrying without unsupported options")
@@ -635,8 +709,19 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
             status = hx_resp.status_code
             # Convert httpx.Response → Flask Response
             resp_headers = _filter_response_headers(hx_resp.headers)
+            content = hx_resp.content
+            if (status < 400 and path == "/v1/chat/completions"
+                    and api_format(model) != "chat_completions"):
+                try:
+                    content = json.dumps(normalize_response(model, hx_resp.json())).encode("utf-8")
+                except (TranslationError, ValueError, KeyError, TypeError) as exc:
+                    return None, None, duration, f"Invalid upstream response: {exc}"
+                resp_headers["Content-Type"] = "application/json"
+                for key in list(resp_headers):
+                    if key.lower() in ("content-range", "etag", "content-md5"):
+                        del resp_headers[key]
             flask_resp = Response(
-                hx_resp.content,
+                content,
                 status=status,
                 headers=resp_headers,
             )
