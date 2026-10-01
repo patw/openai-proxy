@@ -6,6 +6,7 @@ and implements automatic fallback between fast ↔ smart models.
 import atexit
 import json
 import os
+import re
 import threading
 import time
 import httpx
@@ -166,6 +167,32 @@ def _would_inject_usage(body: bytes, settings: dict) -> bool:
         return False
     return (isinstance(data, dict) and bool(data.get("stream"))
             and "stream_options" not in data)
+
+
+def _unsupported_responses_sampling_option(resp, body: bytes) -> str | None:
+    """Retry only when Responses explicitly rejects a sent sampling parameter.
+
+    Do not retry unknown 400s: a retry could duplicate a request the provider
+    actually processed. Even this retry is limited to named unsupported fields.
+    """
+    if getattr(resp, "status_code", None) != 400:
+        return None
+    try:
+        sent = json.loads(body)
+        error = resp.json().get("error", {})
+        if not isinstance(error, dict):
+            return None
+        message = error.get("message", "")
+        param = error.get("param")
+        if (error.get("type") != "invalid_request_error"
+                or not re.search(r"\b(?:not supported|unsupported)\b", message, re.I)):
+            return None
+        for option in ("temperature", "top_p"):
+            if option in sent and (param == option or (not param and re.search(rf"\b{option}\b", message))):
+                return option
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return None
 
 
 def _looks_like_unsupported_option_error(resp) -> bool:
@@ -624,7 +651,8 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
     """
     attempt_body = body
     inject_usage = True
-    for option_retry in (False, True):
+    removed_sampling = set()
+    for option_retry in range(3 if api_format(model) == "openai_responses" else 2):
         try:
             stream_ctx, up = _open_upstream_stream(
                 model, method, path, headers, attempt_body, settings,
@@ -654,9 +682,24 @@ def _attempt_forward_streaming(model: dict, method: str, path: str, headers: dic
         err_headers = _filter_response_headers(up.headers)
         _close_stream(stream_ctx)
 
-        # Parity with the non-streaming path: one retry without the optional
-        # parameters if the backend rejected them. Safe — no bytes emitted yet.
-        if (api_format(model) == "chat_completions" and not option_retry and status == 400
+        if api_format(model) == "openai_responses" and status == 400:
+            class _ErrorCarrier:
+                status_code = status
+
+                def json(self):
+                    return json.loads(err_body)
+            option = _unsupported_responses_sampling_option(_ErrorCarrier(), attempt_body)
+            if option and option not in removed_sampling and option_retry < 2:
+                removed_sampling.add(option)
+                updated = json.loads(attempt_body)
+                updated.pop(option)
+                attempt_body = json.dumps(updated).encode("utf-8")
+                print(f"[{model['name']}] retrying Responses stream without unsupported {option}")
+                continue
+
+        # Chat-completions path: retry without optional parameters on explicit
+        # rejection, while the upstream stream is still uncommitted.
+        if (api_format(model) == "chat_completions" and option_retry == 0 and status == 400
                 and any(m in err_body.decode("utf-8", "replace").lower()
                         for m in UNSUPPORTED_OPTION_ERROR_MARKERS)):
             sanitized_body, changed = _sanitize_unsupported_options(body)
@@ -695,6 +738,21 @@ def _attempt_forward(model: dict, method: str, path: str, headers: dict,
             return _attempt_forward_streaming(model, method, path, headers, body, settings, t0)
         else:
             hx_resp, usage = _forward_non_streaming(model, method, path, headers, body, settings)
+            if path == "/v1/chat/completions" and api_format(model) == "openai_responses":
+                attempt_body = body
+                removed_sampling = set()
+                for _ in range(2):
+                    option = _unsupported_responses_sampling_option(hx_resp, attempt_body)
+                    if not option or option in removed_sampling:
+                        break
+                    removed_sampling.add(option)
+                    updated = json.loads(attempt_body)
+                    updated.pop(option)
+                    attempt_body = json.dumps(updated).encode("utf-8")
+                    print(f"[{model['name']}] retrying Responses without unsupported {option}")
+                    hx_resp, usage = _forward_non_streaming(
+                        model, method, path, headers, attempt_body, settings,
+                    )
             if api_format(model) == "chat_completions" and _looks_like_unsupported_option_error(hx_resp):
                 sanitized_body, changed = _sanitize_unsupported_options(body)
                 if changed or _would_inject_usage(body, settings):

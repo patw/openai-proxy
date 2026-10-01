@@ -163,12 +163,30 @@ Existing models without an API format remain Chat Completions.
 
 Native adapters currently handle text messages, function tools/results, tool
 choice, temperature/top-p, token limits, and SSE text/tool deltas. Responses
-also supports `response_format` JSON modes. Unsupported chat options and
-non-text content (such as images and audio) are rejected instead of silently
+also maps `reasoning_effort` to `reasoning.effort`, carries native reasoning
+and tool state in a tagged `message.reasoning_details` extension, and supports
+`response_format` JSON modes. Some reasoning models reject `temperature` or
+`top_p`; for Responses only, the proxy retries once per parameter **only**
+when the backend explicitly rejects that parameter as unsupported.
+Unsupported chat options and non-text content (such as images and audio) are
+rejected instead of silently
 dropped. Native streams relay final token usage when the backend reports it;
 errors after a stream begins cannot be turned into an HTTP error or retried.
 Other `/v1/` routes remain best-effort passthrough, not format-translated.
 Legacy `/v1/completions` is **not** translated to chat completions.
+
+For native Responses requests, the proxy sets `store: false` so encrypted
+reasoning state is available for manual replay. Its tagged
+`message.reasoning_details` contains the original ordered provider output;
+Anthropic carries signed thinking/redacted-thinking and tool blocks in the
+same extension. Clients that retain and return this field get exact-model
+reasoning continuity across tool turns. Clients that ignore it still get
+ordinary text and tool calls, but their next request lacks opaque reasoning
+context. Never display the encrypted state as assistant text. The envelope
+identifies the exact proxy model and upstream model; on a different model or
+fallback, the proxy uses ordinary visible history rather than replaying
+incompatible state. Nonstandard `reasoning_details` from chat-native backends
+is passed through unchanged.
 
 ---
 
