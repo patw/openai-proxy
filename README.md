@@ -168,9 +168,15 @@ and tool state in a tagged `message.reasoning_details` extension, and supports
 `response_format` JSON modes. Some reasoning models reject `temperature` or
 `top_p`; for Responses only, the proxy retries once per parameter **only**
 when the backend explicitly rejects that parameter as unsupported.
-Unsupported chat options and non-text content (such as images and audio) are
-rejected instead of silently
-dropped. Native streams relay final token usage when the backend reports it;
+Ordered user text and image content is translated to Responses `input_text` /
+`input_image` (including data URLs and `auto`/`low`/`high` detail) or Anthropic
+text/image blocks (HTTP(S) URLs or base64 PNG/JPEG/WebP/GIF). Anthropic does not
+support explicit image detail selection. Image input in non-user roles, malformed
+image URLs, audio, and unsupported options are rejected rather than silently
+dropped. Local translation failures return an OpenAI-style `error` object with
+`message`, `type`, `code`, `source: "openai-proxy"`, `api_format`, and, where
+applicable, `param` / `content_type`; this distinguishes adapter limitations from
+upstream model capability. Native streams relay final token usage when the backend reports it;
 errors after a stream begins cannot be turned into an HTTP error or retried.
 Other `/v1/` routes remain best-effort passthrough, not format-translated.
 Legacy `/v1/completions` is **not** translated to chat completions.

@@ -3,13 +3,29 @@
 The public API remains /v1/chat/completions. Fail explicitly for unsupported
 features rather than silently discarding context or fabricating tool results.
 """
+import base64
+import binascii
 import json
 import time
 import uuid
+from urllib.parse import urlsplit
 
 
 class TranslationError(ValueError):
-    pass
+    def __init__(self, message, *, code="invalid_chat_request", param=None, content_type=None):
+        super().__init__(message)
+        self.code = code
+        self.param = param
+        self.content_type = content_type
+
+    def as_error(self, fmt):
+        error = {"message": str(self), "type": "invalid_request_error",
+                 "code": self.code, "source": "openai-proxy", "api_format": fmt}
+        if self.param is not None:
+            error["param"] = self.param
+        if self.content_type is not None:
+            error["content_type"] = self.content_type
+        return error
 
 
 def api_format(model):
@@ -27,19 +43,90 @@ def upstream_path(model, incoming_path):
     raise TranslationError(f"Unsupported upstream API format: {fmt}")
 
 
-def _text_parts(content):
+def _unsupported_part(kind, param, message=None):
+    raise TranslationError(message or f"Unsupported content part: {kind}",
+                           code="unsupported_content_type", param=param, content_type=kind)
+
+
+def _image_source(part, param):
+    image = part.get("image_url")
+    if not isinstance(image, dict) or set(image) - {"url", "detail"}:
+        raise TranslationError("image_url must contain url and optional detail", param=param)
+    url = image.get("url")
+    if not isinstance(url, str) or not url or url != url.strip():
+        raise TranslationError("image_url.url must be a non-empty URL", param=param + ".image_url.url")
+    detail = image.get("detail", "auto")
+    if detail not in ("auto", "low", "high"):
+        raise TranslationError("image_url.detail must be auto, low, or high", param=param + ".image_url.detail")
+    if url.startswith("data:"):
+        header, sep, encoded = url.partition(",")
+        media_type = header[5:].removesuffix(";base64")
+        if not sep or not header.endswith(";base64") or media_type not in (
+                "image/png", "image/jpeg", "image/webp", "image/gif"):
+            raise TranslationError("Expected a base64 PNG, JPEG, WebP, or GIF image data URL", param=param)
+        try:
+            if not base64.b64decode(encoded, validate=True):
+                raise ValueError("empty image")
+        except (ValueError, binascii.Error):
+            raise TranslationError("Invalid base64 image data", param=param) from None
+        source = {"type": "base64", "media_type": media_type, "data": encoded}
+    else:
+        try:
+            parsed = urlsplit(url)
+            valid = parsed.scheme in ("https", "http") and parsed.hostname and not parsed.username and not parsed.password
+        except ValueError:
+            valid = False
+        if not valid:
+            raise TranslationError("image_url.url must be HTTP(S) or a base64 image data URL", param=param)
+        source = {"type": "url", "url": url}
+    return url, detail, source
+
+
+def _content_parts(content, role, fmt, param):
+    """Preserve ordered multipart content; never fetch image URLs in the proxy."""
+    if content is None:
+        return []
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        raise TranslationError("Message content must be text or an array", param=param)
+    blocks = []
+    for index, part in enumerate(content):
+        location = f"{param}[{index}]"
+        if not isinstance(part, dict):
+            raise TranslationError("Content parts must be objects", param=location)
+        kind = part.get("type")
+        if kind == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise TranslationError("Text content must be a string", param=location + ".text")
+            text_type = ("output_text" if role == "assistant" else "input_text") if fmt == "openai_responses" else "text"
+            blocks.append({"type": text_type, "text": text})
+        elif kind == "image_url":
+            if role != "user":
+                raise TranslationError("Image input is only supported in user messages",
+                                       code="unsupported_content_role", param=location, content_type=kind)
+            url, detail, source = _image_source(part, location)
+            if fmt == "openai_responses":
+                blocks.append({"type": "input_image", "image_url": url, "detail": detail})
+            else:
+                if detail != "auto":
+                    raise TranslationError("Anthropic Messages does not support image detail selection",
+                                           code="unsupported_image_detail", param=location + ".image_url.detail")
+                blocks.append({"type": "image", "source": source})
+        else:
+            _unsupported_part(kind, location)
+    return blocks
+
+
+def _text_parts(content, param="content"):
     if content is None:
         return ""
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        parts = []
-        for part in content:
-            if part.get("type") != "text":
-                raise TranslationError("Only text content parts are supported by this upstream format")
-            parts.append(part.get("text", ""))
-        return "\n".join(parts)
-    raise TranslationError("Unsupported message content")
+    # System and tool-result paths are intentionally text-only.
+    blocks = _content_parts(content, "tool", "anthropic_messages", param)
+    return "\n".join(b["text"] for b in blocks)
 
 
 def _json_args(raw):
@@ -133,8 +220,9 @@ def _responses_request(data, model):
         if effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
             raise TranslationError("Unsupported reasoning effort")
         result["reasoning"] = {"effort": effort}
-    for msg in data.get("messages", []):
+    for msg_index, msg in enumerate(data.get("messages", [])):
         role = msg.get("role")
+        content_param = f"messages[{msg_index}].content"
         if role in ("system", "developer", "user", "assistant"):
             replay = _replay_blocks(msg, model, "openai_responses") if role == "assistant" else None
             if replay is not None:
@@ -144,7 +232,10 @@ def _responses_request(data, model):
                 result["input"].extend(replay)
                 continue
             if msg.get("content") is not None:
-                result["input"].append({"role": role, "content": _text_parts(msg["content"])})
+                content = msg["content"]
+                blocks = _content_parts(content, role, "openai_responses", content_param)
+                # Retain the legacy string shorthand for text-only string messages.
+                result["input"].append({"role": role, "content": content if isinstance(content, str) else blocks})
             elif role != "assistant" or not msg.get("tool_calls"):
                 raise TranslationError("Message content is required")
             if role == "assistant":
@@ -156,7 +247,7 @@ def _responses_request(data, model):
                                             "name": fn["name"], "arguments": fn["arguments"]})
         elif role == "tool":
             result["input"].append({"type": "function_call_output", "call_id": msg["tool_call_id"],
-                                    "output": _text_parts(msg.get("content"))})
+                                    "output": _text_parts(msg.get("content"), content_param)})
         else:
             raise TranslationError(f"Unsupported role: {role}")
     if "tools" in data:
@@ -198,17 +289,16 @@ def _anthropic_request(data, model):
         if key in data:
             result[key] = data[key]
     system = []
-    for msg in data.get("messages", []):
+    for msg_index, msg in enumerate(data.get("messages", [])):
         role = msg.get("role")
+        content_param = f"messages[{msg_index}].content"
         if role in ("system", "developer"):
-            system.append(_text_parts(msg.get("content")))
+            system.append(_text_parts(msg.get("content"), content_param))
         elif role in ("user", "assistant"):
             replay = _replay_blocks(msg, model, "anthropic_messages") if role == "assistant" else None
             blocks = list(replay) if replay is not None else []
             if replay is None and msg.get("content") is not None:
-                text = _text_parts(msg["content"])
-                if text:
-                    blocks.append({"type": "text", "text": text})
+                blocks.extend(_content_parts(msg["content"], role, "anthropic_messages", content_param))
             for call in ([] if replay is not None else msg.get("tool_calls", [])):
                 if role != "assistant" or call.get("type") != "function":
                     raise TranslationError("Only assistant function tool calls are supported")
@@ -224,7 +314,7 @@ def _anthropic_request(data, model):
                 result["messages"].append({"role": role, "content": blocks})
         elif role == "tool":
             block = {"type": "tool_result", "tool_use_id": msg["tool_call_id"],
-                     "content": _text_parts(msg.get("content"))}
+                     "content": _text_parts(msg.get("content"), content_param)}
             if not result["messages"] or result["messages"][-1]["role"] != "assistant":
                 # Multiple tool results may be consecutive; they share a user turn.
                 if not (result["messages"] and result["messages"][-1]["role"] == "user"

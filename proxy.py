@@ -580,7 +580,7 @@ def handle_proxy_request(method: str, path: str, headers: dict, body: bytes):
         try:
             prepare_request(model, path, body)
         except TranslationError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": exc.as_error(api_format(model))}), 400
 
     # ---- Determine fallback ----
     primary = model

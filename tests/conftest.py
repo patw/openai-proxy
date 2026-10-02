@@ -11,9 +11,17 @@ import storage
 @pytest.fixture(autouse=True)
 def temp_data_dir():
     """Use an isolated temporary directory for moofile data in every test."""
+    # Each test uses different files; release the pooled handles before the
+    # temporary directory disappears instead of keeping every test DB open.
+    storage._close_pool()
+    original = storage.DATA_DIR
     with tempfile.TemporaryDirectory() as tmpdir:
         storage.DATA_DIR = tmpdir
-        yield
+        try:
+            yield
+        finally:
+            storage._close_pool()
+            storage.DATA_DIR = original
 
 
 @pytest.fixture(autouse=True)

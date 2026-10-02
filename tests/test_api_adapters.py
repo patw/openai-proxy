@@ -241,7 +241,7 @@ def test_unsupported_options_are_rejected(client, monkeypatch):
     result = client.post("/v1/chat/completions", json={"model": "native", "messages": [
         {"role": "user", "content": "Hi"}], "logit_bias": {"1": 5}})
     assert result.status_code == 400
-    assert "logit_bias" in result.get_json()["error"]
+    assert "logit_bias" in result.get_json()["error"]["message"]
     assert not fake.sent
 
 
@@ -542,3 +542,147 @@ def test_chat_backend_preserves_its_reasoning_fields_unchanged(client, monkeypat
     assert result.status_code == 200
     assert result.get_json()["choices"][0]["message"] == original
     assert fake.sent[0][2]["messages"][1] == original
+
+
+IMAGE_URL = 'data:image/png;base64,aW1hZ2U='
+
+
+def image_message(url=IMAGE_URL, detail='auto'):
+    return {'role': 'user', 'content': [
+        {'type': 'text', 'text': 'before'},
+        {'type': 'image_url', 'image_url': {'url': url, 'detail': detail}},
+        {'type': 'text', 'text': 'after'}]}
+
+
+@pytest.mark.parametrize('url', [IMAGE_URL, 'https://example.test/image.png'])
+@pytest.mark.parametrize('detail', ['auto', 'low', 'high'])
+def test_responses_multipart_preserves_order_url_and_detail(url, detail):
+    model = {'name': 'native', 'api_format': 'openai_responses', 'api_model_name': 'upstream'}
+    data = {'model': 'native', 'messages': [image_message(url, detail),
+        {'role': 'assistant', 'content': [{'type': 'text', 'text': 'answer'}]}]}
+    _, raw = prepare_request(model, '/v1/chat/completions', json.dumps(data).encode())
+    items = json.loads(raw)['input']
+    assert items[0]['content'] == [
+        {'type': 'input_text', 'text': 'before'},
+        {'type': 'input_image', 'image_url': url, 'detail': detail},
+        {'type': 'input_text', 'text': 'after'}]
+    assert items[1]['content'] == [{'type': 'output_text', 'text': 'answer'}]
+    assert data['messages'][0] == image_message(url, detail)
+
+
+@pytest.mark.parametrize('url,source', [
+    (IMAGE_URL, {'type': 'base64', 'media_type': 'image/png', 'data': 'aW1hZ2U='}),
+    ('https://example.test/image.png', {'type': 'url', 'url': 'https://example.test/image.png'})])
+def test_anthropic_multipart_preserves_order_and_source(url, source):
+    model = {'name': 'native', 'api_format': 'anthropic_messages', 'api_model_name': 'upstream'}
+    _, raw = prepare_request(model, '/v1/chat/completions', json.dumps({
+        'model': 'native', 'messages': [image_message(url)]}).encode())
+    assert json.loads(raw)['messages'][0]['content'] == [
+        {'type': 'text', 'text': 'before'}, {'type': 'image', 'source': source},
+        {'type': 'text', 'text': 'after'}]
+
+
+@pytest.mark.parametrize('fmt', ['openai_responses', 'anthropic_messages'])
+@pytest.mark.parametrize('part', [None, {'type': 'text', 'text': 3},
+    {'type': 'image_url', 'image_url': 'bad'},
+    {'type': 'image_url', 'image_url': {'url': ''}},
+    {'type': 'image_url', 'image_url': {'url': 'file:///tmp/image.png'}},
+    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,%%'}},
+    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,'}},
+    {'type': 'image_url', 'image_url': {'url': 'data:text/plain;base64,aGk='}},
+    {'type': 'image_url', 'image_url': {'url': IMAGE_URL, 'detail': 'invalid'}},
+    {'type': 'input_audio', 'input_audio': {'data': 'abc'}}])
+def test_malformed_or_unsupported_parts_rejected(fmt, part):
+    model = {'api_format': fmt, 'api_model_name': 'upstream'}
+    with pytest.raises(TranslationError):
+        prepare_request(model, '/v1/chat/completions', json.dumps({
+            'model': 'native', 'messages': [{'role': 'user', 'content': [part]}]}).encode())
+
+
+@pytest.mark.parametrize('role', ['assistant', 'system', 'developer', 'tool'])
+@pytest.mark.parametrize('fmt', ['openai_responses', 'anthropic_messages'])
+def test_image_role_rejected_without_dropping_it(role, fmt):
+    msg = image_message()
+    msg.update(role=role, tool_call_id='c1')
+    with pytest.raises(TranslationError, match='only supported in user messages'):
+        prepare_request({'api_format': fmt, 'api_model_name': 'upstream'},
+                        '/v1/chat/completions', json.dumps({'messages': [msg]}).encode())
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_read_image_tool_round_trip_with_replay_and_multipart(client, monkeypatch, stream):
+    make_model('native', 'openai_responses')
+    call = {'type': 'function_call', 'call_id': 'c1', 'name': 'read_image', 'arguments': '{"path":"shot.png"}'}
+    first_payload = responses_payload([
+        {'type': 'reasoning', 'encrypted_content': 'opaque', 'summary': []}, call])
+    replies = [FakeResponse(200, first_payload)]
+    if stream:
+        replies.append(FakeStreamResponse(200, [
+            ('response.output_text.delta', {'delta': 'a blue rectangle'}),
+            ('response.completed', {'response': responses_payload()})]))
+    else:
+        replies.append(FakeResponse(200, responses_payload()))
+    fake = FakeClient(replies)
+    monkeypatch.setattr(proxy, 'get_http_client', lambda: fake)
+    messages = [{'role': 'user', 'content': 'Inspect shot.png'}]
+    first = client.post('/v1/chat/completions', json={'model': 'native', 'messages': messages})
+    assistant = first.get_json()['choices'][0]['message']
+    second = client.post('/v1/chat/completions', json={'model': 'native', 'stream': stream,
+        'messages': messages + [assistant, {'role': 'tool', 'tool_call_id': 'c1',
+        'content': 'Loaded shot.png'}, image_message()]})
+    assert second.status_code == 200
+    if stream:
+        assert 'data: [DONE]' in second.get_data(as_text=True)
+    items = fake.sent[1][2]['input']
+    assert [i.get('type') for i in items] == [None, 'reasoning', 'function_call', 'function_call_output', None]
+    assert items[3]['call_id'] == 'c1'
+    assert items[-1]['content'][1]['type'] == 'input_image'
+    assert items[-1]['content'][1]['image_url'] == IMAGE_URL
+
+
+def test_legacy_images_pass_through(client, monkeypatch):
+    make_model('legacy', 'chat_completions')
+    fake = FakeClient([FakeResponse(200, {'choices': [{'message': {'content': 'ok'}}]})])
+    monkeypatch.setattr(proxy, 'get_http_client', lambda: fake)
+    result = client.post('/v1/chat/completions', json={'model': 'legacy', 'messages': [image_message()]})
+    assert result.status_code == 200
+    assert fake.sent[0][2]['messages'] == [image_message()]
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('fmt', ['openai_responses', 'anthropic_messages'])
+def test_structured_content_errors_before_forward(client, monkeypatch, stream, fmt):
+    make_model('native', fmt)
+    fake = FakeClient([])
+    monkeypatch.setattr(proxy, 'get_http_client', lambda: fake)
+    response = client.post('/v1/chat/completions', json={'model': 'native', 'stream': stream,
+        'messages': [{'role': 'user', 'content': [{'type': 'input_audio'}]}]})
+    assert response.status_code == 400
+    assert response.get_json()['error'] == {
+        'message': 'Unsupported content part: input_audio', 'type': 'invalid_request_error',
+        'code': 'unsupported_content_type', 'source': 'openai-proxy', 'api_format': fmt,
+        'param': 'messages[0].content[0]', 'content_type': 'input_audio'}
+    assert fake.sent == []
+
+
+def test_anthropic_detail_is_explicit_error(client, monkeypatch):
+    make_model('native', 'anthropic_messages')
+    fake = FakeClient([])
+    monkeypatch.setattr(proxy, 'get_http_client', lambda: fake)
+    response = client.post('/v1/chat/completions', json={'model': 'native',
+        'messages': [image_message(detail='high')]})
+    assert response.status_code == 400
+    assert response.get_json()['error']['code'] == 'unsupported_image_detail'
+    assert not fake.sent
+
+
+def test_mixed_image_fallback_retranslates_original(client, monkeypatch):
+    make_model('primary', 'openai_responses', 'fast')
+    make_model('backup', 'anthropic_messages', 'smart')
+    fake = FakeClient([FakeResponse(503, {'error': 'unavailable'}),
+                       FakeResponse(200, anthropic_payload())])
+    monkeypatch.setattr(proxy, 'get_http_client', lambda: fake)
+    result = client.post('/v1/chat/completions', json={'model': 'fast', 'messages': [image_message()]})
+    assert result.status_code == 200
+    assert fake.sent[0][2]['input'][0]['content'][1]['type'] == 'input_image'
+    assert fake.sent[1][2]['messages'][0]['content'][1]['type'] == 'image'
